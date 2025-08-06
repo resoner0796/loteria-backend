@@ -1,67 +1,82 @@
-// === server.js actualizado ===
-const express = require("express");
+const express = require('express');
+const http = require('http');
+const cors = require('cors');
+const { Server } = require('socket.io');
+
 const app = express();
-const http = require("http").createServer(app);
-const { Server } = require("socket.io");
-const io = new Server(http);
-const path = require("path");
+const server = http.createServer(app);
 
-const PORT = process.env.PORT || 3000;
+// Configura CORS para aceptar tu dominio de GitHub Pages
+const io = new Server(server, {
+  cors: {
+    origin: 'https://resoner0796.github.io', // <--- PON TU DOMINIO GITHUB AQUÍ
+    methods: ['GET', 'POST']
+  }
+});
 
-let jugadores = {};
-let historial = [];
-let cartasSeleccionadas = [];
+const jugadores = {};
 let hostId = null;
+let historialCartas = [];
+let cartasSeleccionadas = new Set();
 
-app.use(express.static(path.join(__dirname, ".")));
+io.on('connection', (socket) => {
+  console.log(`Jugador conectado: ${socket.id}`);
 
-io.on("connection", (socket) => {
-  console.log("Nuevo jugador conectado:", socket.id);
+  socket.on('registrar-nickname', (nickname) => {
+    if (!hostId) hostId = socket.id;
 
-  socket.on("registrarJugador", (nickname) => {
-    const esHost = !hostId;
-    if (esHost) hostId = socket.id;
+    jugadores[socket.id] = {
+      nickname,
+      host: socket.id === hostId
+    };
 
-    jugadores[socket.id] = { nickname, esHost };
-
-    socket.emit("rolAsignado", { esHost });
-    socket.emit("actualizarCartasOcupadas", cartasSeleccionadas);
-    socket.emit("actualizarHistorial", historial);
-    io.emit("jugadorConectado", jugadores);
+    socket.emit('rol-asignado', jugadores[socket.id]);
+    io.emit('jugadores-actualizados', jugadores);
+    socket.emit('cartas-desactivadas', Array.from(cartasSeleccionadas));
+    socket.emit('historial-actualizado', historialCartas);
   });
 
-  socket.on("cartasSeleccionadas", (cartas) => {
-    cartasSeleccionadas.push(...cartas);
-    io.emit("actualizarCartasOcupadas", cartasSeleccionadas);
+  socket.on('seleccionar-carta', (carta) => {
+    cartasSeleccionadas.add(carta);
+    io.emit('cartas-desactivadas', Array.from(cartasSeleccionadas));
   });
 
-  socket.on("barajar", () => {
-    historial = [];
-    io.emit("limpiarHistorial");
+  socket.on('barajear', () => {
+    historialCartas = [];
+    io.emit('barajear');
   });
 
-  socket.on("cantarCarta", (carta) => {
-    historial.push(carta);
-    io.emit("nuevaCartaCantada", carta);
+  socket.on('cantar-carta', (carta) => {
+    historialCartas.push(carta);
+    io.emit('carta-cantada', carta);
   });
 
-  socket.on("reiniciarJuego", () => {
-    historial = [];
-    cartasSeleccionadas = [];
-    io.emit("reiniciarPartida");
+  socket.on('detener-juego', () => {
+    io.emit('juego-detenido');
   });
 
-  socket.on("disconnect", () => {
-    console.log("Jugador desconectado:", socket.id);
+  socket.on('loteria', (nickname) => {
+    io.emit('loteria-anunciada', nickname);
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`Jugador desconectado: ${socket.id}`);
     delete jugadores[socket.id];
+
     if (socket.id === hostId) {
-      hostId = null;
-      io.emit("hostDesconectado");
+      hostId = Object.keys(jugadores)[0] || null;
+      if (hostId) jugadores[hostId].host = true;
     }
-    io.emit("jugadorConectado", jugadores);
+
+    io.emit('jugadores-actualizados', jugadores);
   });
 });
 
-http.listen(PORT, () => {
-  console.log(`Servidor de Lotería funcionando en http://localhost:${PORT}`);
+app.get('/', (req, res) => {
+  res.send('Servidor de Lotería funcionando 🎉');
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Servidor corriendo en el puerto ${PORT}`);
 });
