@@ -6,7 +6,7 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// Configura CORS
+// Configura CORS para tu dominio de GitHub Pages
 const io = new Server(server, {
   cors: {
     origin: 'https://resoner0796.github.io',
@@ -14,19 +14,17 @@ const io = new Server(server, {
   }
 });
 
-// Variables del juego
 const jugadores = {};
 let hostId = null;
 let historialCartas = [];
 let cartasSeleccionadas = new Set();
 let juegoEnCurso = false;
 let baraja = [];
-let intervaloCantar = null;
+let intervalo;
 
 io.on('connection', (socket) => {
   console.log(`Jugador conectado: ${socket.id}`);
 
-  // Registro nickname
   socket.on('registrar-nickname', (nickname) => {
     if (!hostId) hostId = socket.id;
 
@@ -37,88 +35,57 @@ io.on('connection', (socket) => {
 
     socket.emit('rol-asignado', jugadores[socket.id]);
     io.emit('jugadores-actualizados', jugadores);
+
     socket.emit('cartas-desactivadas', Array.from(cartasSeleccionadas));
     socket.emit('historial-actualizado', historialCartas);
   });
 
-  // Selección de carta
   socket.on('seleccionar-carta', (carta) => {
     cartasSeleccionadas.add(carta);
     io.emit('cartas-desactivadas', Array.from(cartasSeleccionadas));
   });
 
-  // Barajear cartas (solo host)
   socket.on('barajear', () => {
     if (socket.id !== hostId) return;
     historialCartas = [];
-    baraja = generarBaraja();
+    juegoEnCurso = false;
+    clearInterval(intervalo);
     io.emit('barajear');
-    io.emit('historial-actualizado', historialCartas);
   });
 
-  // Iniciar juego (solo host)
   socket.on('iniciar-juego', () => {
-    if (socket.id !== hostId || juegoEnCurso || baraja.length === 0) return;
+    if (socket.id !== hostId) return;
 
     juegoEnCurso = true;
-
-    // Campana y corre
-    io.emit('reproducir-audio', 'campana.mp3');
-    setTimeout(() => {
-      io.emit('reproducir-audio', 'corre.mp3');
-    }, 3000);
+    baraja = shuffleDeck();
+    io.emit('iniciar-cantada');
 
     setTimeout(() => {
-      cantarCarta();
-      intervaloCantar = setInterval(cantarCarta, 6000);
-    }, 6000);
+      cantarCartas();
+    }, 3000); // Espera a que termine el sonido de campana y corre
   });
 
-  // Cantar carta
-  function cantarCarta() {
-    if (baraja.length === 0) {
-      clearInterval(intervaloCantar);
-      juegoEnCurso = false;
-      return;
-    }
-
-    const carta = baraja.shift();
-    historialCartas.push(carta);
-    io.emit('carta-cantada', carta);
-    io.emit('historial-actualizado', historialCartas);
-  }
-
-  // Detener juego
   socket.on('detener-juego', () => {
     if (socket.id !== hostId) return;
-    clearInterval(intervaloCantar);
     juegoEnCurso = false;
+    clearInterval(intervalo);
     io.emit('juego-detenido');
   });
 
-  // Lotería
   socket.on('loteria', (nickname) => {
     io.emit('loteria-anunciada', nickname);
-    clearInterval(intervaloCantar);
-    juegoEnCurso = false;
   });
 
-  // Reiniciar partida
   socket.on('reiniciar-partida', () => {
     if (socket.id !== hostId) return;
-
+    hostId = null;
     historialCartas = [];
-    cartasSeleccionadas = new Set();
-    baraja = [];
+    cartasSeleccionadas.clear();
     juegoEnCurso = false;
-    clearInterval(intervaloCantar);
-
-    io.emit('reiniciar');
-    io.emit('cartas-desactivadas', []);
-    io.emit('historial-actualizado', []);
+    clearInterval(intervalo);
+    io.emit('reiniciar-cliente');
   });
 
-  // Desconexión
   socket.on('disconnect', () => {
     console.log(`Jugador desconectado: ${socket.id}`);
     delete jugadores[socket.id];
@@ -132,22 +99,35 @@ io.on('connection', (socket) => {
   });
 });
 
-// Ruta de prueba
+function shuffleDeck() {
+  const cartas = Array.from({ length: 10 }, (_, i) => String(i + 1).padStart(2, '0'));
+  for (let i = cartas.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [cartas[i], cartas[j]] = [cartas[j], cartas[i]];
+  }
+  return cartas;
+}
+
+function cantarCartas() {
+  if (!juegoEnCurso) return;
+
+  intervalo = setInterval(() => {
+    if (baraja.length === 0) {
+      clearInterval(intervalo);
+      return;
+    }
+
+    const carta = baraja.shift();
+    historialCartas.push(carta);
+    io.emit('carta-cantada', carta);
+  }, 3000);
+}
+
 app.get('/', (req, res) => {
   res.send('Servidor de Lotería funcionando 🎉');
 });
 
-// Generar baraja aleatoria
-function generarBaraja() {
-  const baraja = [];
-  for (let i = 1; i <= 54; i++) {
-    const num = String(i).padStart(2, '0');
-    baraja.push(num);
-  }
-  return baraja.sort(() => Math.random() - 0.5);
-}
-
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Servidor corriendo en puerto ${PORT}`);
+  console.log(`Servidor corriendo en el puerto ${PORT}`);
 });
