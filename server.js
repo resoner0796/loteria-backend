@@ -1,79 +1,51 @@
-const express = require("express");
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const cors = require('cors');
+
 const app = express();
-const http = require("http").createServer(app);
-const io = require("socket.io")(http, {
+app.use(cors());
+const server = http.createServer(app);
+const io = socketIo(server, {
   cors: {
-    origin: "*"
+    origin: '*'
   }
 });
 
-const PORT = process.env.PORT || 3000;
+let jugadores = [];
+let hostId = null;
 
-let baraja = [];
-let historial = [];
-let juegoIniciado = false;
+io.on('connection', (socket) => {
+  console.log(`Usuario conectado: ${socket.id}`);
 
-app.get("/", (req, res) => {
-  res.send("Servidor de Lotería funcionando.");
-});
+  socket.on('join', (nickname) => {
+    const esHost = hostId === null;
+    if (esHost) hostId = socket.id;
 
-io.on("connection", socket => {
-  console.log("Nuevo jugador conectado:", socket.id);
+    jugadores.push({ id: socket.id, nickname, esHost });
+    console.log(`${nickname} se ha unido. Host: ${esHost}`);
 
-  // Enviar historial al nuevo jugador
-  socket.emit("historial", historial);
-
-  // Jugador dice que ganó
-  socket.on("loteria", () => {
-    io.emit("mensaje", `🎉 El jugador ${socket.id} cantó ¡Lotería!`);
-    io.emit("detener");
+    socket.emit('rol', esHost); // Enviar si es host o no
+    io.emit('jugadores', jugadores.map(j => j.nickname));
   });
 
-  socket.on("limpiar", () => {
-    socket.emit("limpiarFichas");
+  socket.on('loteria', (ganador) => {
+    io.emit('ganador', ganador);
   });
 
-  socket.on("iniciar", () => {
-    if (!juegoIniciado) {
-      baraja = mezclarBaraja();
-      historial = [];
-      juegoIniciado = true;
-      io.emit("juego-iniciado");
-      repartirCartas();
+  socket.on('disconnect', () => {
+    jugadores = jugadores.filter(j => j.id !== socket.id);
+    if (socket.id === hostId) {
+      console.log("Host salió. Reiniciando host.");
+      hostId = jugadores.length > 0 ? jugadores[0].id : null;
+      if (hostId && jugadores.length > 0) {
+        io.to(hostId).emit('rol', true); // Nuevo host
+      }
     }
-  });
-
-  socket.on("barajear", () => {
-    io.emit("barajeando");
-  });
-
-  socket.on("detener", () => {
-    juegoIniciado = false;
-    io.emit("detener");
-  });
-
-  socket.on("disconnect", () => {
-    console.log("Jugador desconectado:", socket.id);
+    io.emit('jugadores', jugadores.map(j => j.nickname));
   });
 });
 
-function mezclarBaraja() {
-  return Array.from({ length: 54 }, (_, i) => String(i + 1).padStart(2, "0")).sort(() => Math.random() - 0.5);
-}
-
-function repartirCartas() {
-  let index = 0;
-  const intervalo = setInterval(() => {
-    if (!juegoIniciado || index >= baraja.length) {
-      clearInterval(intervalo);
-      return;
-    }
-    const carta = baraja[index++];
-    historial.push(carta);
-    io.emit("carta", carta);
-  }, 4000);
-}
-
-http.listen(PORT, () => {
-  console.log(`Servidor corriendo en puerto ${PORT}`);
+server.listen(3000, () => {
+  console.log('Servidor de Lotería funcionando en el puerto 3000');
 });
