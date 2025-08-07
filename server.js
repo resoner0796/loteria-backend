@@ -37,11 +37,12 @@ io.on('connection', (socket) => {
         barajitas: [],
         barajeoEnCurso: false,
         intervalo: null,
-        juegoPausado: false,  // Nuevo estado para pausar el juego
+        juegoPausado: false,
+        apuestas: {},
+        monedas: {},
       };
     }
 
-    // Asignar host si el nickname es "Host Amigos", etc.
     const esHostCustom = nickname.toLowerCase() === `host ${sala.toLowerCase()}`;
     if (esHostCustom || !salas[sala].hostId) {
       salas[sala].hostId = socket.id;
@@ -50,16 +51,40 @@ io.on('connection', (socket) => {
     const esHost = socket.id === salas[sala].hostId;
     salas[sala].jugadores[socket.id] = { nickname, host: esHost };
 
+    if (!salas[sala].monedas[socket.id]) {
+      salas[sala].monedas[socket.id] = 10; // monedas iniciales
+    }
+
     socket.emit('rol-asignado', { host: esHost });
     socket.emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
     socket.emit('historial-actualizado', salas[sala].historial);
-    io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+    io.to(sala).emit('jugadores-actualizados', getJugadoresConApuesta(sala));
   });
 
   socket.on('seleccionar-carta', ({ sala, carta }) => {
     if (!salas[sala]) return;
     salas[sala].cartasSeleccionadas.add(carta);
     io.to(sala).emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
+  });
+
+  socket.on('apostar', (sala) => {
+    const data = salas[sala];
+    if (!data) return;
+    const jugador = data.jugadores[socket.id];
+    if (!jugador || data.apuestas[socket.id]) return;
+
+    const cartas = Object.values(data.cartasSeleccionadas).filter(c => c); // puede mejorarse
+    const costo = 1 * Object.values(cartas).filter(c => c).length;
+    const saldo = data.monedas[socket.id] || 0;
+
+    if (saldo < costo) {
+      socket.emit('error-apuesta', 'No tienes monedas suficientes');
+      return;
+    }
+
+    data.apuestas[socket.id] = true;
+    data.monedas[socket.id] -= costo;
+    io.to(sala).emit('jugadores-actualizados', getJugadoresConApuesta(sala));
   });
 
   socket.on('barajear', (sala) => {
@@ -86,14 +111,12 @@ io.on('connection', (socket) => {
       data.barajeoEnCurso = true;
 
       data.intervalo = setInterval(() => {
-        if (data.juegoPausado) return; // Pausa el avance si juego está pausado
-
+        if (data.juegoPausado) return;
         if (index >= data.barajitas.length) {
           clearInterval(data.intervalo);
           data.barajeoEnCurso = false;
           return;
         }
-
         const carta = data.barajitas[index];
         data.historial.push(carta);
         io.to(sala).emit('carta-cantada', carta);
@@ -110,18 +133,24 @@ io.on('connection', (socket) => {
     io.to(sala).emit('juego-detenido');
   });
 
-  // Nuevo evento para pausar el juego cuando alguien canta "Lotería"
   socket.on('loteria', ({ sala, nickname }) => {
     if (!salas[sala]) return;
     const data = salas[sala];
-    // Pausar juego
     data.juegoPausado = true;
     clearInterval(data.intervalo);
     data.barajeoEnCurso = false;
 
-    // Emitir que se pausó y quién cantó lotería
+    // Ganador cobra el bote
+    const apostadores = Object.keys(data.apuestas || {});
+    const bote = apostadores.length;
+    if (data.monedas[socket.id] != null) {
+      data.monedas[socket.id] += bote;
+    }
+
+    data.apuestas = {};
     io.to(sala).emit('loteria-anunciada', nickname);
-    io.to(sala).emit('juego-detenido'); // Para que los clientes sepan que el juego está pausado (ej. audio aplausos)
+    io.to(sala).emit('juego-detenido');
+    io.to(sala).emit('jugadores-actualizados', getJugadoresConApuesta(sala));
   });
 
   socket.on('reiniciar-partida', (sala) => {
@@ -131,6 +160,7 @@ io.on('connection', (socket) => {
     salas[sala].barajitas = [];
     salas[sala].barajeoEnCurso = false;
     salas[sala].juegoPausado = false;
+    salas[sala].apuestas = {};
 
     io.to(sala).emit('partida-reiniciada');
     io.to(sala).emit('volver-a-seleccion');
@@ -144,6 +174,8 @@ io.on('connection', (socket) => {
       if (!data || !data.jugadores[socket.id]) return;
 
       delete data.jugadores[socket.id];
+      delete data.apuestas[socket.id];
+      delete data.monedas[socket.id];
 
       if (socket.id === data.hostId) {
         const nuevosJugadores = Object.keys(data.jugadores);
@@ -153,7 +185,7 @@ io.on('connection', (socket) => {
         }
       }
 
-      io.to(sala).emit('jugadores-actualizados', data.jugadores);
+      io.to(sala).emit('jugadores-actualizados', getJugadoresConApuesta(sala));
     });
   });
 
@@ -161,6 +193,20 @@ io.on('connection', (socket) => {
     console.log(`Jugador desconectado: ${socket.id}`);
   });
 });
+
+function getJugadoresConApuesta(sala) {
+  const data = salas[sala];
+  if (!data) return {};
+  const resultado = {};
+  for (const [id, info] of Object.entries(data.jugadores)) {
+    resultado[id] = {
+      ...info,
+      haApostado: !!data.apuestas[id],
+      monedas: data.monedas[id] || 0,
+    };
+  }
+  return resultado;
+}
 
 app.use(cors());
 
