@@ -36,8 +36,7 @@ io.on('connection', (socket) => {
         historial: [],
         barajitas: [],
         barajeoEnCurso: false,
-        intervalo: null,
-        juegoPausado: false,  // Nuevo estado para pausar el juego
+        intervalo: null
       };
     }
 
@@ -66,13 +65,12 @@ io.on('connection', (socket) => {
     if (!salas[sala]) return;
     salas[sala].historial = [];
     salas[sala].barajitas = generarBarajitas();
-    salas[sala].juegoPausado = false;
     io.to(sala).emit('barajear');
   });
 
   socket.on('iniciar-juego', (sala) => {
     const data = salas[sala];
-    if (!data || data.barajeoEnCurso || data.juegoPausado) return;
+    if (!data || data.barajeoEnCurso) return;
 
     if (data.barajitas.length === 0) {
       data.barajitas = generarBarajitas();
@@ -86,8 +84,6 @@ io.on('connection', (socket) => {
       data.barajeoEnCurso = true;
 
       data.intervalo = setInterval(() => {
-        if (data.juegoPausado) return; // Pausa el avance si juego está pausado
-
         if (index >= data.barajitas.length) {
           clearInterval(data.intervalo);
           data.barajeoEnCurso = false;
@@ -106,22 +102,7 @@ io.on('connection', (socket) => {
     if (!salas[sala]) return;
     clearInterval(salas[sala].intervalo);
     salas[sala].barajeoEnCurso = false;
-    salas[sala].juegoPausado = false;
     io.to(sala).emit('juego-detenido');
-  });
-
-  // Nuevo evento para pausar el juego cuando alguien canta "Lotería"
-  socket.on('loteria', ({ sala, nickname }) => {
-    if (!salas[sala]) return;
-    const data = salas[sala];
-    // Pausar juego
-    data.juegoPausado = true;
-    clearInterval(data.intervalo);
-    data.barajeoEnCurso = false;
-
-    // Emitir que se pausó y quién cantó lotería
-    io.to(sala).emit('loteria-anunciada', nickname);
-    io.to(sala).emit('juego-detenido'); // Para que los clientes sepan que el juego está pausado (ej. audio aplausos)
   });
 
   socket.on('reiniciar-partida', (sala) => {
@@ -130,10 +111,14 @@ io.on('connection', (socket) => {
     salas[sala].cartasSeleccionadas.clear();
     salas[sala].barajitas = [];
     salas[sala].barajeoEnCurso = false;
-    salas[sala].juegoPausado = false;
 
+    // Notificar a los jugadores que deben volver a pantalla de selección
     io.to(sala).emit('partida-reiniciada');
     io.to(sala).emit('volver-a-seleccion');
+  });
+
+  socket.on('loteria', ({ sala, nickname }) => {
+    io.to(sala).emit('loteria-anunciada', nickname);
   });
 
   socket.on('disconnecting', () => {
@@ -161,8 +146,6 @@ io.on('connection', (socket) => {
     console.log(`Jugador desconectado: ${socket.id}`);
   });
 });
-
-app.use(cors());
 
 app.get('/', (req, res) => {
   res.send('🎯 Servidor de Lotería funcionando con múltiples salas');
