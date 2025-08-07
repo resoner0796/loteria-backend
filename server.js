@@ -39,6 +39,7 @@ io.on('connection', (socket) => {
         juegoPausado: false,
         apuestas: {},
         monedas: {},
+        cartasJugadores: {}
       };
     }
 
@@ -64,6 +65,13 @@ io.on('connection', (socket) => {
     if (!salas[sala]) return;
     salas[sala].cartasSeleccionadas.add(carta);
     io.to(sala).emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
+  });
+
+  // 💡 NUEVO: Al presionar "Continuar" después de seleccionar cartas
+  socket.on('cartas-listas', ({ sala, cartas }) => {
+    if (!salas[sala]) return;
+    salas[sala].cartasJugadores[socket.id] = cartas;
+    socket.emit('iniciar-juego-cliente', cartas);
   });
 
   socket.on('apostar', ({ sala, cantidad }) => {
@@ -158,6 +166,7 @@ io.on('connection', (socket) => {
     salas[sala].barajeoEnCurso = false;
     salas[sala].juegoPausado = false;
     salas[sala].apuestas = {};
+    salas[sala].cartasJugadores = {};
 
     io.to(sala).emit('partida-reiniciada');
     io.to(sala).emit('volver-a-seleccion');
@@ -173,6 +182,7 @@ io.on('connection', (socket) => {
       delete data.jugadores[socket.id];
       delete data.apuestas[socket.id];
       delete data.monedas[socket.id];
+      delete data.cartasJugadores[socket.id];
 
       if (socket.id === data.hostId) {
         const nuevosJugadores = Object.keys(data.jugadores);
