@@ -6,7 +6,7 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// Habilitar CORS para tu GitHub Pages
+// Permitir tu frontend en GitHub Pages
 const io = new Server(server, {
   cors: {
     origin: "https://resoner0796.github.io",
@@ -20,7 +20,7 @@ let cartasSeleccionadas = new Set();
 let historial = [];
 let barajitas = [];
 let barajeoEnCurso = false;
-let intervalo;
+let intervalo = null;
 
 function generarBarajitas() {
   const total = 54;
@@ -29,8 +29,9 @@ function generarBarajitas() {
 }
 
 io.on('connection', (socket) => {
-  console.log(`Jugador conectado: ${socket.id}`);
+  console.log(`✅ Jugador conectado: ${socket.id}`);
 
+  // Registro de nickname
   socket.on('registrar-nickname', (nickname) => {
     if (!hostId) hostId = socket.id;
 
@@ -45,22 +46,26 @@ io.on('connection', (socket) => {
     io.emit('jugadores-actualizados', jugadores);
   });
 
+  // Registro de cartas seleccionadas
   socket.on('seleccionar-carta', (carta) => {
     cartasSeleccionadas.add(carta);
     io.emit('cartas-desactivadas', Array.from(cartasSeleccionadas));
   });
 
+  // Barajear barajitas
   socket.on('barajear', () => {
     historial = [];
     barajitas = generarBarajitas();
     io.emit('barajear');
   });
 
+  // Iniciar juego: campana → corre → cantar barajitas
   socket.on('iniciar-juego', () => {
     if (barajeoEnCurso) return;
     if (barajitas.length === 0) barajitas = generarBarajitas();
 
     io.emit('campana');
+
     setTimeout(() => {
       io.emit('corre');
 
@@ -82,28 +87,31 @@ io.on('connection', (socket) => {
     }, 2000);
   });
 
+  // Detener juego
   socket.on('detener-juego', () => {
     clearInterval(intervalo);
     barajeoEnCurso = false;
     io.emit('juego-detenido');
   });
 
+  // Reiniciar partida
   socket.on('reiniciar-partida', () => {
     historial = [];
     cartasSeleccionadas.clear();
-    hostId = null;
     barajitas = [];
     barajeoEnCurso = false;
-
+    hostId = null;
     io.emit('partida-reiniciada');
   });
 
+  // Anunciar LOTERÍA
   socket.on('loteria', (nickname) => {
     io.emit('loteria-anunciada', nickname);
   });
 
+  // Desconexión
   socket.on('disconnect', () => {
-    console.log(`Jugador desconectado: ${socket.id}`);
+    console.log(`⛔ Jugador desconectado: ${socket.id}`);
     delete jugadores[socket.id];
 
     if (socket.id === hostId) {
@@ -116,10 +124,10 @@ io.on('connection', (socket) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('🎯 Servidor de Lotería en línea y funcionando');
+  res.send('🎯 Servidor de Lotería funcionando al 100%');
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Servidor corriendo en el puerto ${PORT}`);
+  console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
 });
