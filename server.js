@@ -6,7 +6,6 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// Habilitar CORS para tu GitHub Pages
 const io = new Server(server, {
   cors: {
     origin: "https://resoner0796.github.io",
@@ -14,16 +13,9 @@ const io = new Server(server, {
   }
 });
 
-// Estado global del juego
-const jugadores = {};
-let hostId = null;
-let cartasSeleccionadas = new Set();
-let historial = [];
-let barajitas = [];
-let barajeoEnCurso = false;
-let intervalo;
+// Estado global por sala
+const salas = {};
 
-// Generar barajitas del 01 al 54 en orden aleatorio
 function generarBarajitas() {
   const total = 54;
   const barajas = Array.from({ length: total }, (_, i) => String(i + 1).padStart(2, '0'));
@@ -33,91 +25,121 @@ function generarBarajitas() {
 io.on('connection', (socket) => {
   console.log(`Jugador conectado: ${socket.id}`);
 
-  socket.on('registrar-nickname', (nickname) => {
-    if (!hostId) hostId = socket.id;
+  socket.on('unirse-sala', ({ sala, nickname }) => {
+    socket.join(sala);
 
-    jugadores[socket.id] = {
-      nickname,
-      host: socket.id === hostId
-    };
+    if (!salas[sala]) {
+      salas[sala] = {
+        jugadores: {},
+        hostId: socket.id,
+        cartasSeleccionadas: new Set(),
+        historial: [],
+        barajitas: [],
+        barajeoEnCurso: false,
+        intervalo: null
+      };
+    }
 
-    socket.emit('rol-asignado', jugadores[socket.id]);
-    socket.emit('cartas-desactivadas', Array.from(cartasSeleccionadas));
-    socket.emit('historial-actualizado', historial);
-    io.emit('jugadores-actualizados', jugadores);
+    const esHost = socket.id === salas[sala].hostId;
+    salas[sala].jugadores[socket.id] = { nickname, host: esHost };
+    
+    socket.emit('rol-asignado', { host: esHost });
+    socket.emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
+    socket.emit('historial-actualizado', salas[sala].historial);
+    io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
   });
 
-  socket.on('seleccionar-carta', (carta) => {
-    cartasSeleccionadas.add(carta);
-    io.emit('cartas-desactivadas', Array.from(cartasSeleccionadas));
+  socket.on('seleccionar-carta', ({ sala, carta }) => {
+    if (!salas[sala]) return;
+    salas[sala].cartasSeleccionadas.add(carta);
+    io.to(sala).emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
   });
 
-  socket.on('barajear', () => {
-    historial = [];
-    barajitas = generarBarajitas();
-    io.emit('barajear');
+  socket.on('barajear', (sala) => {
+    if (!salas[sala]) return;
+    salas[sala].historial = [];
+    salas[sala].barajitas = generarBarajitas();
+    io.to(sala).emit('barajear');
   });
 
-  socket.on('iniciar-juego', () => {
-    if (barajeoEnCurso) return;
-    if (barajitas.length === 0) barajitas = generarBarajitas();
+  socket.on('iniciar-juego', (sala) => {
+    const data = salas[sala];
+    if (!data || data.barajeoEnCurso) return;
 
-    io.emit('campana');
+    if (data.barajitas.length === 0) {
+      data.barajitas = generarBarajitas();
+    }
+
+    io.to(sala).emit('campana');
+
     setTimeout(() => {
-      io.emit('corre');
-
+      io.to(sala).emit('corre');
       let index = 0;
-      barajeoEnCurso = true;
+      data.barajeoEnCurso = true;
 
-      intervalo = setInterval(() => {
-        if (index >= barajitas.length) {
-          clearInterval(intervalo);
-          barajeoEnCurso = false;
+      data.intervalo = setInterval(() => {
+        if (index >= data.barajitas.length) {
+          clearInterval(data.intervalo);
+          data.barajeoEnCurso = false;
           return;
         }
 
-        const carta = barajitas[index];
-        historial.push(carta);
-        io.emit('carta-cantada', carta);
+        const carta = data.barajitas[index];
+        data.historial.push(carta);
+        io.to(sala).emit('carta-cantada', carta);
         index++;
       }, 4000);
     }, 2000);
   });
 
-  socket.on('detener-juego', () => {
-    clearInterval(intervalo);
-    barajeoEnCurso = false;
-    io.emit('juego-detenido');
+  socket.on('detener-juego', (sala) => {
+    if (!salas[sala]) return;
+    clearInterval(salas[sala].intervalo);
+    salas[sala].barajeoEnCurso = false;
+    io.to(sala).emit('juego-detenido');
   });
 
-  socket.on('reiniciar-partida', () => {
-    historial = [];
-    cartasSeleccionadas.clear();
-    hostId = null;
-    barajitas = [];
-    barajeoEnCurso = false;
-    io.emit('partida-reiniciada');
+  socket.on('reiniciar-partida', (sala) => {
+    if (!salas[sala]) return;
+    salas[sala].historial = [];
+    salas[sala].cartasSeleccionadas.clear();
+    salas[sala].barajitas = [];
+    salas[sala].barajeoEnCurso = false;
+    io.to(sala).emit('partida-reiniciada');
   });
 
-  socket.on('loteria', (nickname) => {
-    io.emit('loteria-anunciada', nickname);
+  socket.on('loteria', ({ sala, nickname }) => {
+    io.to(sala).emit('loteria-anunciada', nickname);
+  });
+
+  socket.on('disconnecting', () => {
+    const salasUsuario = Array.from(socket.rooms).filter(s => s !== socket.id);
+
+    salasUsuario.forEach(sala => {
+      const data = salas[sala];
+      if (!data || !data.jugadores[socket.id]) return;
+
+      delete data.jugadores[socket.id];
+
+      if (socket.id === data.hostId) {
+        const nuevosJugadores = Object.keys(data.jugadores);
+        data.hostId = nuevosJugadores[0] || null;
+        if (data.hostId) {
+          data.jugadores[data.hostId].host = true;
+        }
+      }
+
+      io.to(sala).emit('jugadores-actualizados', data.jugadores);
+    });
   });
 
   socket.on('disconnect', () => {
     console.log(`Jugador desconectado: ${socket.id}`);
-    delete jugadores[socket.id];
-
-    if (socket.id === hostId) {
-      hostId = Object.keys(jugadores)[0] || null;
-      if (hostId) jugadores[hostId].host = true;
-    }
-
-    io.emit('jugadores-actualizados', jugadores);
   });
 });
 
 app.get('/', (req, res) => {
-  res.send('🎯 Servidor de Lotería en línea y funcionando');
+  res.send('🎯 Servidor de Lotería funcionando con múltiples salas');
 });
 
 const PORT = process.env.PORT || 3000;
