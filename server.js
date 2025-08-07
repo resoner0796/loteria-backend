@@ -13,7 +13,6 @@ const io = new Server(server, {
   }
 });
 
-// Estado global por sala
 const salas = {};
 
 function generarBarajitas() {
@@ -52,7 +51,7 @@ io.on('connection', (socket) => {
     salas[sala].jugadores[socket.id] = { nickname, host: esHost };
 
     if (!salas[sala].monedas[socket.id]) {
-      salas[sala].monedas[socket.id] = 10; // monedas iniciales
+      salas[sala].monedas[socket.id] = 10;
     }
 
     socket.emit('rol-asignado', { host: esHost });
@@ -67,23 +66,22 @@ io.on('connection', (socket) => {
     io.to(sala).emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
   });
 
-  socket.on('apostar', (sala) => {
+  socket.on('apostar', ({ sala, cantidad }) => {
     const data = salas[sala];
     if (!data) return;
     const jugador = data.jugadores[socket.id];
     if (!jugador || data.apuestas[socket.id]) return;
 
-    const cartas = Object.values(data.cartasSeleccionadas).filter(c => c); // puede mejorarse
-    const costo = 1 * Object.values(cartas).filter(c => c).length;
     const saldo = data.monedas[socket.id] || 0;
 
-    if (saldo < costo) {
+    if (saldo < cantidad) {
       socket.emit('error-apuesta', 'No tienes monedas suficientes');
       return;
     }
 
     data.apuestas[socket.id] = true;
-    data.monedas[socket.id] -= costo;
+    data.monedas[socket.id] -= cantidad;
+
     io.to(sala).emit('jugadores-actualizados', getJugadoresConApuesta(sala));
   });
 
@@ -140,7 +138,6 @@ io.on('connection', (socket) => {
     clearInterval(data.intervalo);
     data.barajeoEnCurso = false;
 
-    // Ganador cobra el bote
     const apostadores = Object.keys(data.apuestas || {});
     const bote = apostadores.length;
     if (data.monedas[socket.id] != null) {
