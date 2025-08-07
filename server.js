@@ -31,7 +31,7 @@ io.on('connection', (socket) => {
     if (!salas[sala]) {
       salas[sala] = {
         jugadores: {},
-        hostId: socket.id,
+        hostId: null,
         cartasSeleccionadas: new Set(),
         historial: [],
         barajitas: [],
@@ -40,9 +40,15 @@ io.on('connection', (socket) => {
       };
     }
 
+    // Asignar host si el nickname es "Host Amigos", etc.
+    const esHostCustom = nickname.toLowerCase() === `host ${sala.toLowerCase()}`;
+    if (esHostCustom || !salas[sala].hostId) {
+      salas[sala].hostId = socket.id;
+    }
+
     const esHost = socket.id === salas[sala].hostId;
     salas[sala].jugadores[socket.id] = { nickname, host: esHost };
-    
+
     socket.emit('rol-asignado', { host: esHost });
     socket.emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
     socket.emit('historial-actualizado', salas[sala].historial);
@@ -105,7 +111,10 @@ io.on('connection', (socket) => {
     salas[sala].cartasSeleccionadas.clear();
     salas[sala].barajitas = [];
     salas[sala].barajeoEnCurso = false;
+
+    // Notificar a los jugadores que deben volver a pantalla de selección
     io.to(sala).emit('partida-reiniciada');
+    io.to(sala).emit('volver-a-seleccion');
   });
 
   socket.on('loteria', ({ sala, nickname }) => {
