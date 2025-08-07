@@ -6,26 +6,26 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// CORS para GitHub Pages
+// Habilitar CORS para tu GitHub Pages
 const io = new Server(server, {
   cors: {
-    origin: 'https://resoner0796.github.io',
-    methods: ['GET', 'POST']
+    origin: "https://resoner0796.github.io",
+    methods: ["GET", "POST"]
   }
 });
 
 const jugadores = {};
 let hostId = null;
-let historialCartas = [];
 let cartasSeleccionadas = new Set();
-let baraja = [];
-let barajaInterval = null;
+let historial = [];
+let barajitas = [];
+let barajeoEnCurso = false;
+let intervalo;
 
-// Inicializar baraja de 54 cartas
-function reiniciarBaraja() {
-  baraja = Array.from({ length: 54 }, (_, i) => String(i + 1).padStart(2, '0'));
-  historialCartas = [];
-  clearInterval(barajaInterval);
+function generarBarajitas() {
+  const total = 54;
+  const barajas = Array.from({ length: total }, (_, i) => String(i + 1).padStart(2, '0'));
+  return barajas.sort(() => Math.random() - 0.5);
 }
 
 io.on('connection', (socket) => {
@@ -40,9 +40,9 @@ io.on('connection', (socket) => {
     };
 
     socket.emit('rol-asignado', jugadores[socket.id]);
-    io.emit('jugadores-actualizados', jugadores);
     socket.emit('cartas-desactivadas', Array.from(cartasSeleccionadas));
-    socket.emit('historial-actualizado', historialCartas);
+    socket.emit('historial-actualizado', historial);
+    io.emit('jugadores-actualizados', jugadores);
   });
 
   socket.on('seleccionar-carta', (carta) => {
@@ -51,57 +51,64 @@ io.on('connection', (socket) => {
   });
 
   socket.on('barajear', () => {
-    reiniciarBaraja();
+    historial = [];
+    barajitas = generarBarajitas();
     io.emit('barajear');
   });
 
-  socket.on('iniciarJuego', () => {
-    if (socket.id !== hostId) return;
+  socket.on('iniciar-juego', () => {
+    if (barajeoEnCurso) return;
+    if (barajitas.length === 0) barajitas = generarBarajitas();
 
-    clearInterval(barajaInterval);
-    barajaInterval = setInterval(() => {
-      if (baraja.length === 0) {
-        clearInterval(barajaInterval);
-        return;
-      }
+    io.emit('campana');
+    setTimeout(() => {
+      io.emit('corre');
 
-      const carta = baraja.shift();
-      historialCartas.push(carta);
-      io.emit('cartaCantada', carta);
-    }, 3500); // Tiempo entre barajitas
+      let index = 0;
+      barajeoEnCurso = true;
+
+      intervalo = setInterval(() => {
+        if (index >= barajitas.length) {
+          clearInterval(intervalo);
+          barajeoEnCurso = false;
+          return;
+        }
+
+        const carta = barajitas[index];
+        historial.push(carta);
+        io.emit('carta-cantada', carta);
+        index++;
+      }, 4000);
+    }, 2000);
   });
 
-  socket.on('detenerJuego', () => {
-    clearInterval(barajaInterval);
-    io.emit('juegoDetenido');
+  socket.on('detener-juego', () => {
+    clearInterval(intervalo);
+    barajeoEnCurso = false;
+    io.emit('juego-detenido');
+  });
+
+  socket.on('reiniciar-partida', () => {
+    historial = [];
+    cartasSeleccionadas.clear();
+    hostId = null;
+    barajitas = [];
+    barajeoEnCurso = false;
+
+    io.emit('partida-reiniciada');
   });
 
   socket.on('loteria', (nickname) => {
     io.emit('loteria-anunciada', nickname);
   });
 
-  socket.on('reiniciarPartida', () => {
-    if (socket.id !== hostId) return;
-
-    hostId = null;
-    historialCartas = [];
-    cartasSeleccionadas.clear();
-    reiniciarBaraja();
-    io.emit('partidaReiniciada');
-  });
-
   socket.on('disconnect', () => {
     console.log(`Jugador desconectado: ${socket.id}`);
-    const eraHost = socket.id === hostId;
     delete jugadores[socket.id];
 
-    if (eraHost) {
-      const idsRestantes = Object.keys(jugadores);
-      hostId = idsRestantes[0] || null;
-      if (hostId && jugadores[hostId]) {
-        jugadores[hostId].host = true;
-        io.to(hostId).emit('rol-asignado', jugadores[hostId]);
-      }
+    if (socket.id === hostId) {
+      hostId = Object.keys(jugadores)[0] || null;
+      if (hostId) jugadores[hostId].host = true;
     }
 
     io.emit('jugadores-actualizados', jugadores);
@@ -109,7 +116,7 @@ io.on('connection', (socket) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('🎉 Servidor de Lotería en funcionamiento.');
+  res.send('🎯 Servidor de Lotería en línea y funcionando');
 });
 
 const PORT = process.env.PORT || 3000;
