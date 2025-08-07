@@ -30,25 +30,10 @@ function generarBarajitas() {
   return barajas.sort(() => Math.random() - 0.5);
 }
 
-function resetJuego() {
-  historial = [];
-  cartasSeleccionadas.clear();
-  barajitas = [];
-  barajeoEnCurso = false;
-  clearInterval(intervalo);
-}
-
 io.on('connection', (socket) => {
   console.log(`Jugador conectado: ${socket.id}`);
 
   socket.on('registrar-nickname', (nickname) => {
-    // Validar nombre único
-    const existe = Object.values(jugadores).some(j => j.nickname === nickname);
-    if (existe) {
-      socket.emit('error-nickname', 'Ese nombre ya está en uso');
-      return;
-    }
-
     if (!hostId) hostId = socket.id;
 
     jugadores[socket.id] = {
@@ -68,14 +53,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('barajear', () => {
-    if (socket.id !== hostId) return;
-    resetJuego();
+    historial = [];
     barajitas = generarBarajitas();
     io.emit('barajear');
   });
 
   socket.on('iniciar-juego', () => {
-    if (socket.id !== hostId) return;
     if (barajeoEnCurso) return;
     if (barajitas.length === 0) barajitas = generarBarajitas();
 
@@ -102,34 +85,17 @@ io.on('connection', (socket) => {
   });
 
   socket.on('detener-juego', () => {
-    if (socket.id !== hostId) return;
     clearInterval(intervalo);
     barajeoEnCurso = false;
     io.emit('juego-detenido');
   });
 
   socket.on('reiniciar-partida', () => {
-    if (socket.id !== hostId) return;
-
-    resetJuego();
-
-    // reasignar host
-    const jugadoresConectados = Object.keys(jugadores);
-    if (jugadoresConectados.length > 0) {
-      hostId = jugadoresConectados[0];
-      // Resetear host flag en todos
-      for (const id of jugadoresConectados) {
-        jugadores[id].host = id === hostId;
-      }
-    } else {
-      hostId = null;
-    }
-
-    // Reenviar roles a todos
-    for (const id of jugadoresConectados) {
-      io.to(id).emit('rol-asignado', jugadores[id]);
-    }
-
+    historial = [];
+    cartasSeleccionadas.clear();
+    hostId = null;
+    barajitas = [];
+    barajeoEnCurso = false;
     io.emit('partida-reiniciada');
   });
 
@@ -139,18 +105,10 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log(`Jugador desconectado: ${socket.id}`);
-
-    // Limpiar intervalo si host se desconecta
-    if (socket.id === hostId) {
-      clearInterval(intervalo);
-      barajeoEnCurso = false;
-    }
-
     delete jugadores[socket.id];
 
     if (socket.id === hostId) {
-      const jugadoresConectados = Object.keys(jugadores);
-      hostId = jugadoresConectados[0] || null;
+      hostId = Object.keys(jugadores)[0] || null;
       if (hostId) jugadores[hostId].host = true;
     }
 
