@@ -6,7 +6,7 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// Configuración de CORS para GitHub Pages
+// Habilitar CORS para tu GitHub Pages
 const io = new Server(server, {
   cors: {
     origin: "https://resoner0796.github.io",
@@ -14,6 +14,7 @@ const io = new Server(server, {
   }
 });
 
+// Estado global del juego
 const jugadores = {};
 let hostId = null;
 let cartasSeleccionadas = new Set();
@@ -22,7 +23,7 @@ let barajitas = [];
 let barajeoEnCurso = false;
 let intervalo;
 
-// Función para barajear las 54 barajitas
+// Generar barajitas del 01 al 54 en orden aleatorio
 function generarBarajitas() {
   const total = 54;
   const barajas = Array.from({ length: total }, (_, i) => String(i + 1).padStart(2, '0'));
@@ -62,7 +63,6 @@ io.on('connection', (socket) => {
     if (barajitas.length === 0) barajitas = generarBarajitas();
 
     io.emit('campana');
-
     setTimeout(() => {
       io.emit('corre');
 
