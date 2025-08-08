@@ -1,195 +1,241 @@
-const express = require('express');
-const http = require('http');
-const socketIo = require('socket.io');
+const express = require('express'); 
+ const http = require('http'); 
+ const cors = require('cors'); 
+ const { Server } = require('socket.io'); 
 
-const app = express();
-const server = http.createServer(app);
-const io = socketIo(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
-});
+ const app = express(); 
+ const server = http.createServer(app); 
 
-app.use(express.static('public'));
+ const io = new Server(server, { 
+   cors: { 
+     origin: "https://resoner0796.github.io", 
+     methods: ["GET", "POST"] 
+   } 
+ }); 
 
-const PORT = process.env.PORT || 3000;
+ // Estado global por sala 
+ const salas = {}; 
 
-let salas = {};
+ function generarBarajitas() { 
+   const total = 54; 
+   const barajas = Array.from({ length: total }, (_, i) => String(i + 1).padStart(2, '0')); 
+   return barajas.sort(() => Math.random() - 0.5); 
+ } 
+ function shuffleArray(array) {
+   for (let i = array.length - 1; i > 0; i--) {
+     const j = Math.floor(Math.random() * (i + 1));
+     [array[i], array[j]] = [array[j], array[i]];
+   }
+ }
+ 
 
-io.on('connection', (socket) => {
-  console.log('Nuevo cliente conectado:', socket.id);
+ io.on('connection', (socket) => { 
+   console.log(`Jugador conectado: ${socket.id}`); 
 
-  socket.on('unirse-sala', ({ nickname, sala }) => {
-    socket.join(sala);
-    const jugadorId = socket.id;
-    
-    if (!salas[sala]) {
-      salas[sala] = {
-        jugadores: {},
-        cartasCantadas: [],
-        mazo: [],
-        bote: 0,
-        juegoIniciado: false,
-        hostId: jugadorId
-      };
-      console.log(`Sala ${sala} creada por el host: ${nickname}`);
-    }
+   socket.on('unirse-sala', ({ sala, nickname }) => { 
+     socket.join(sala); 
 
-    salas[sala].jugadores[jugadorId] = {
-      nickname,
-      monedas: 30,
-      cartasSeleccionadas: [],
-      apostado: false,
-    };
+     if (!salas[sala]) { 
+       salas[sala] = { 
+         jugadores: {}, 
+         hostId: null, 
+         cartasSeleccionadas: new Set(), 
+         historial: [], 
+         barajitas: [], 
+         barajeoEnCurso: false, 
+         intervalo: null, 
+         juegoPausado: false, 
+         bote: 0 // Nuevo bote global 
+       }; 
+     } 
 
-    socket.sala = sala;
+     const esHostCustom = nickname.toLowerCase() === `host ${sala.toLowerCase()}`; 
+     if (esHostCustom || !salas[sala].hostId) { 
+       salas[sala].hostId = socket.id; 
+     } 
 
-    const esHost = jugadorId === salas[sala].hostId;
-    socket.emit('rol-asignado', { host: esHost });
+     const esHost = socket.id === salas[sala].hostId; 
+     salas[sala].jugadores[socket.id] = {  
+       nickname,  
+       host: esHost, 
+       monedas: 30, // Monedas iniciales por jugador 
+       apostado: false // Marca si ya apostó en la ronda 
+     }; 
 
-    io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
-    io.to(sala).emit('historial-actualizado', salas[sala].cartasCantadas);
-  });
-  
-  socket.on('seleccionar-carta', ({ carta, sala }) => {
-    const jugador = salas[sala].jugadores[socket.id];
-    if (jugador.cartasSeleccionadas.length < 3 && !jugador.cartasSeleccionadas.includes(carta)) {
-      jugador.cartasSeleccionadas.push(carta);
-    }
-  });
+     socket.emit('rol-asignado', { host: esHost }); 
+     socket.emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas)); 
+     socket.emit('historial-actualizado', salas[sala].historial); 
+     io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores); 
+     io.to(sala).emit('bote-actualizado', salas[sala].bote);
+   }); 
 
-  socket.on('apostar', ({ sala, cantidad }) => {
-    const jugador = salas[sala].jugadores[socket.id];
-    if (!jugador) return socket.emit('error-apuesta', 'No estás en una sala.');
-    if (jugador.apostado) return socket.emit('error-apuesta', 'Ya apostaste en esta ronda.');
-    if (cantidad <= 0 || cantidad > jugador.monedas) return socket.emit('error-apuesta', 'Cantidad de apuesta no válida.');
+   socket.on('seleccionar-carta', ({ sala, carta }) => { 
+     if (!salas[sala]) return; 
+     salas[sala].cartasSeleccionadas.add(carta); 
+     io.to(sala).emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas)); 
+   }); 
 
-    jugador.monedas -= cantidad;
-    salas[sala].bote += cantidad;
-    jugador.apostado = true;
-    
-    io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
-    io.to(sala).emit('bote-actualizado', salas[sala].bote);
-  });
-  
-  socket.on('barajear', (sala) => {
-    const salaObj = salas[sala];
-    if (!salaObj || socket.id !== salaObj.hostId) return;
+   socket.on('barajear', (sala) => { 
+     const salaObj = salas[sala];
+     if (!salaObj) return; 
+     salaObj.historial = []; 
+     salaObj.barajitas = generarBarajitas(); 
+     salaObj.juegoPausado = false; 
+     io.to(sala).emit('barajear');
+     io.to(sala).emit('historial-actualizado', salaObj.historial);
+     
+     // Reiniciar estado de apuestas
+     salaObj.bote = 0;
+     for (const id in salaObj.jugadores) {
+       salaObj.jugadores[id].apostado = false;
+     }
+     io.to(sala).emit('jugadores-actualizados', salaObj.jugadores);
+     io.to(sala).emit('bote-actualizado', 0);
+   }); 
 
-    salaObj.mazo = Array.from({ length: 16 }, (_, i) => String(i + 1).padStart(2, '0'));
-    salaObj.cartasCantadas = [];
-    shuffleArray(salaObj.mazo);
-    
-    io.to(sala).emit('barajear');
-    io.to(sala).emit('historial-actualizado', salaObj.cartasCantadas);
-  });
+   socket.on('iniciar-juego', (sala) => { 
+     const data = salas[sala]; 
+     if (!data || data.barajeoEnCurso || data.juegoPausado) return; 
 
-  socket.on('iniciar-juego', (sala) => {
-    const salaObj = salas[sala];
-    if (!salaObj || socket.id !== salaObj.hostId) return;
+     if (data.barajitas.length === 0) { 
+       data.barajitas = generarBarajitas(); 
+     } 
+     
+     io.to(sala).emit('campana'); 
+     
+     setTimeout(() => { 
+       io.to(sala).emit('corre'); 
+       let index = 0; 
+       data.barajeoEnCurso = true; 
 
-    if (Object.values(salaObj.jugadores).some(j => j.cartasSeleccionadas.length === 0)) {
-      return socket.emit('error-juego', 'Todos los jugadores deben seleccionar sus cartas.');
-    }
+       data.intervalo = setInterval(() => { 
+         if (data.juegoPausado) return; 
 
-    salaObj.juegoIniciado = true;
-    cantarCarta(sala);
-  });
+         if (index >= data.barajitas.length) { 
+           clearInterval(data.intervalo); 
+           data.barajeoEnCurso = false; 
+           return; 
+         } 
 
-  socket.on('detener-juego', (sala) => {
-    const salaObj = salas[sala];
-    if (!salaObj || socket.id !== salaObj.hostId) return;
-    salaObj.juegoIniciado = false;
-    io.to(sala).emit('juego-detenido');
-  });
+         const carta = data.barajitas[index]; 
+         data.historial.push(carta); 
+         io.to(sala).emit('carta-cantada', carta); 
+         index++; 
+       }, 4000); 
+     }, 2000); 
+   }); 
 
-  socket.on('loteria', ({ nickname, sala }) => {
-    io.to(sala).emit('loteria-anunciada', nickname);
-  });
+   socket.on('detener-juego', (sala) => {   
+     if (!salas[sala]) return; 
+     clearInterval(salas[sala].intervalo); 
+     salas[sala].barajeoEnCurso = false; 
+     salas[sala].juegoPausado = true;
+     io.to(sala).emit('juego-detenido'); 
+   }); 
 
-  socket.on('confirmar-ganador', ({ sala, ganadorId }) => {
-    const salaObj = salas[sala];
-    if (!salaObj || socket.id !== salaObj.hostId) return;
-    
-    // Transferir el bote al ganador
-    if (salaObj.jugadores[ganadorId]) {
-      salaObj.jugadores[ganadorId].monedas += salaObj.bote;
-      console.log(`El ganador ${salaObj.jugadores[ganadorId].nickname} recibe ${salaObj.bote} monedas.`);
-    }
+   socket.on('loteria', ({ sala, nickname }) => { 
+     if (!salas[sala]) return; 
+     const data = salas[sala]; 
+     data.juegoPausado = true; 
+     clearInterval(data.intervalo); 
+     data.barajeoEnCurso = false; 
 
-    // Reiniciar el estado de apuestas para la siguiente ronda
-    salaObj.bote = 0;
-    Object.values(salaObj.jugadores).forEach(jugador => {
-      jugador.apostado = false;
-    });
+     io.to(sala).emit('loteria-anunciada', nickname); 
+     io.to(sala).emit('juego-detenido'); 
+   }); 
 
-    io.to(sala).emit('jugadores-actualizados', salaObj.jugadores);
-    io.to(sala).emit('bote-actualizado', salaObj.bote);
-  });
-  
-  socket.on('reiniciar-partida', (sala) => {
-    const salaObj = salas[sala];
-    if (!salaObj || socket.id !== salaObj.hostId) return;
+   socket.on('apostar', ({ sala, cantidad }) => { 
+     const data = salas[sala]; 
+     if (!data) return; 
 
-    salaObj.juegoIniciado = false;
-    salaObj.cartasCantadas = [];
-    salaObj.bote = 0;
-    
-    Object.values(salaObj.jugadores).forEach(jugador => {
-      jugador.cartasSeleccionadas = [];
-      jugador.apostado = false;
-    });
+     const jugador = data.jugadores[socket.id]; 
+     if (!jugador) return socket.emit('error-apuesta', 'No estás en una sala.');
+     if (jugador.apostado) return socket.emit('error-apuesta', 'Ya apostaste en esta ronda.');
 
-    io.to(sala).emit('partida-reiniciada');
-    io.to(sala).emit('jugadores-actualizados', salaObj.jugadores);
-  });
+     if (jugador.monedas >= cantidad) { 
+       jugador.monedas -= cantidad; 
+       data.bote += cantidad; 
+       jugador.apostado = true; 
+       
+       io.to(sala).emit('jugadores-actualizados', data.jugadores); 
+       io.to(sala).emit('bote-actualizado', data.bote);   
+     } else {
+       socket.emit('error-apuesta', 'No tienes suficientes monedas.');
+     }
+   }); 
 
-  socket.on('disconnect', () => {
-    console.log('Cliente desconectado:', socket.id);
-    const sala = socket.sala;
-    if (sala && salas[sala]) {
-      delete salas[sala].jugadores[socket.id];
-      if (Object.keys(salas[sala].jugadores).length === 0) {
-        delete salas[sala];
-        console.log(`Sala ${sala} eliminada.`);
-      } else {
-        if (salas[sala].hostId === socket.id) {
-          const nuevosJugadores = Object.keys(salas[sala].jugadores);
-          salas[sala].hostId = nuevosJugadores[0];
-          io.to(nuevosJugadores[0]).emit('rol-asignado', { host: true });
-        }
-        io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
-      }
-    }
-  });
-});
+   socket.on('confirmar-ganador', ({ sala, ganadorId }) => { 
+     const data = salas[sala]; 
+     if (!data) return; 
 
-function shuffleArray(array) {
-  for (let i = array.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [array[i], array[j]] = [array[j], array[i]];
-  }
-}
+     const ganador = data.jugadores[ganadorId]; 
+     if (!ganador) return; 
 
-function cantarCarta(sala) {
-  const salaObj = salas[sala];
-  if (!salaObj || !salaObj.juegoIniciado) return;
+     ganador.monedas += data.bote; // Entregar bote 
+     data.bote = 0; 
+ 
+     // Reiniciar estado de apuestas 
+     for (const id in data.jugadores) { 
+       data.jugadores[id].apostado = false; 
+     } 
 
-  const carta = salaObj.mazo.shift();
-  if (carta) {
-    salaObj.cartasCantadas.push(carta);
-    io.to(sala).emit('carta-cantada', carta);
-    io.to(sala).emit('historial-actualizado', salaObj.cartasCantadas);
+     io.to(sala).emit('jugadores-actualizados', data.jugadores); 
+     io.to(sala).emit('bote-actualizado', 0); 
+   }); 
 
-    setTimeout(() => {
-      cantarCarta(sala);
-    }, 4000);
-  } else {
-    io.to(sala).emit('juego-terminado');
-  }
-}
+   socket.on('reiniciar-partida', (sala) => { 
+     const salaObj = salas[sala];
+     if (!salaObj) return; 
+     salaObj.historial = []; 
+     salaObj.cartasSeleccionadas.clear(); 
+     salaObj.barajitas = []; 
+     salaObj.barajeoEnCurso = false; 
+     salaObj.juegoPausado = false; 
 
-server.listen(PORT, () => {
-  console.log(`Servidor escuchando en el puerto ${PORT}`);
-});
+     // Reiniciar apuestas 
+     salaObj.bote = 0; 
+     for (const id in salaObj.jugadores) { 
+       salaObj.jugadores[id].apostado = false; 
+     } 
+
+     io.to(sala).emit('partida-reiniciada'); 
+     io.to(sala).emit('jugadores-actualizados', salaObj.jugadores);
+     io.to(sala).emit('bote-actualizado', 0); 
+   }); 
+
+   socket.on('disconnecting', () => { 
+     const salasUsuario = Array.from(socket.rooms).filter(s => s !== socket.id); 
+
+     salasUsuario.forEach(sala => { 
+       const data = salas[sala]; 
+       if (!data || !data.jugadores[socket.id]) return; 
+
+       delete data.jugadores[socket.id]; 
+
+       if (socket.id === data.hostId) { 
+         const nuevosJugadores = Object.keys(data.jugadores); 
+         data.hostId = nuevosJugadores[0] || null; 
+         if (data.hostId) { 
+           data.jugadores[data.hostId].host = true; 
+         } 
+       } 
+
+       io.to(sala).emit('jugadores-actualizados', data.jugadores); 
+     }); 
+   }); 
+
+   socket.on('disconnect', () => { 
+     console.log(`Jugador desconectado: ${socket.id}`); 
+   }); 
+ }); 
+
+ app.use(cors()); 
+
+ app.get('/', (req, res) => { 
+   res.send('🎯 Servidor de Lotería funcionando con múltiples salas + apuestas'); 
+ }); 
+
+ const PORT = process.env.PORT || 3000; 
+ server.listen(PORT, () => { 
+   console.log(`Servidor corriendo en el puerto ${PORT}`); 
+ });
