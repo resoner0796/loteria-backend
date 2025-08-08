@@ -21,13 +21,6 @@ const express = require('express');
    const barajas = Array.from({ length: total }, (_, i) => String(i + 1).padStart(2, '0')); 
    return barajas.sort(() => Math.random() - 0.5); 
  } 
- function shuffleArray(array) {
-   for (let i = array.length - 1; i > 0; i--) {
-     const j = Math.floor(Math.random() * (i + 1));
-     [array[i], array[j]] = [array[j], array[i]];
-   }
- }
- 
 
  io.on('connection', (socket) => { 
    console.log(`Jugador conectado: ${socket.id}`); 
@@ -125,7 +118,7 @@ const express = require('express');
      }, 2000); 
    }); 
 
-   socket.on('detener-juego', (sala) => {   
+   socket.on('detener-juego', (sala) => {  
      if (!salas[sala]) return; 
      clearInterval(salas[sala].intervalo); 
      salas[sala].barajeoEnCurso = false; 
@@ -140,7 +133,8 @@ const express = require('express');
      clearInterval(data.intervalo); 
      data.barajeoEnCurso = false; 
 
-     io.to(sala).emit('loteria-anunciada', nickname); 
+     // Corregido: Enviar el ID del jugador que cantó lotería
+     io.to(sala).emit('loteria-anunciada', nickname, socket.id); 
      io.to(sala).emit('juego-detenido'); 
    }); 
 
@@ -158,7 +152,7 @@ const express = require('express');
        jugador.apostado = true; 
        
        io.to(sala).emit('jugadores-actualizados', data.jugadores); 
-       io.to(sala).emit('bote-actualizado', data.bote);   
+       io.to(sala).emit('bote-actualizado', data.bote);  
      } else {
        socket.emit('error-apuesta', 'No tienes suficientes monedas.');
      }
@@ -170,6 +164,9 @@ const express = require('express');
 
      const ganador = data.jugadores[ganadorId]; 
      if (!ganador) return; 
+     
+     // Solo el host puede confirmar un ganador
+     if (socket.id !== data.hostId) return;
 
      ganador.monedas += data.bote; // Entregar bote 
      data.bote = 0; 
