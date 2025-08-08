@@ -105,7 +105,7 @@ io.on('connection', (socket) => {
         data.historial.push(carta);
         io.to(sala).emit('carta-cantada', carta);
         index++;
-      }, 4000);
+      }, 5000);
     }, 2000);
   });
 
