@@ -58,11 +58,12 @@ io.on('connection', (socket) => {
     socket.emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
     socket.emit('historial-actualizado', salas[sala].historial);
     
-    io.to(sala).emit('jugadores-actualizados', Object.values(salas[sala].jugadores).map(j => ({
-      nickname: j.nickname,
-      host: j.host,
-      apostado: j.apostado
-    })));
+    io.to(sala).emit('jugadores-actualizados', Object.entries(data.jugadores).map(([id, j]) => ({
+  id,
+  nickname: j.nickname,
+  host: j.host,
+  apostado: j.apostado
+})));
     
     io.to(sala).emit('bote-actualizado', salas[sala].bote);
     // ✅ Agregamos esta línea para que cada jugador reciba sus monedas al unirse
@@ -152,11 +153,12 @@ io.on('connection', (socket) => {
       // ✅ Enviamos solo al jugador que apostó su cantidad actualizada de monedas
       socket.emit('monedas-actualizado', jugador.monedas);
       
-      io.to(sala).emit('jugadores-actualizados', Object.values(data.jugadores).map(j => ({
-        nickname: j.nickname,
-        host: j.host,
-        apostado: j.apostado
-      })));
+      io.to(sala).emit('jugadores-actualizados', Object.entries(data.jugadores).map(([id, j]) => ({
+  id,
+  nickname: j.nickname,
+  host: j.host,
+  apostado: j.apostado
+})));
       io.to(sala).emit('bote-actualizado', data.bote);
     } else {
       socket.emit('error-apuesta', 'No tienes suficientes monedas.');
@@ -182,11 +184,12 @@ io.on('connection', (socket) => {
     // ✅ Enviamos solo al ganador su cantidad actualizada de monedas
     io.to(ganadorId).emit('monedas-actualizado', ganador.monedas);
 
-    io.to(sala).emit('jugadores-actualizados', Object.values(data.jugadores).map(j => ({
-      nickname: j.nickname,
-      host: j.host,
-      apostado: j.apostado
-    })));
+    io.to(sala).emit('jugadores-actualizados', Object.entries(data.jugadores).map(([id, j]) => ({
+  id,
+  nickname: j.nickname,
+  host: j.host,
+  apostado: j.apostado
+})));
     io.to(sala).emit('bote-actualizado', 0);
   });
 
@@ -232,11 +235,12 @@ io.on('connection', (socket) => {
         }
       }
 
-      io.to(sala).emit('jugadores-actualizados', Object.values(data.jugadores).map(j => ({
-        nickname: j.nickname,
-        host: j.host,
-        apostado: j.apostado
-      })));
+      io.to(sala).emit('jugadores-actualizados', Object.entries(data.jugadores).map(([id, j]) => ({
+  id,
+  nickname: j.nickname,
+  host: j.host,
+  apostado: j.apostado
+})));
     });
   });
 
