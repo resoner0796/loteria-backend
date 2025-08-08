@@ -138,10 +138,10 @@ io.on('connection', (socket) => {
     let cartasActivas = Array.from(data.cartasSeleccionadas).length;
     if (cartasActivas === 0) return;
 
-   if (jugador.monedas >= cantidad) {
-  jugador.monedas -= cantidad;
-  data.bote += cantidad;
-  jugador.apostado = true;
+   if (jugador.monedas >= cartasActivas) {
+      jugador.monedas -= cartasActivas;
+      data.bote += cartasActivas;
+      jugador.apostado = true;
      
       io.to(sala).emit('jugadores-actualizados', data.jugadores);
       io.to(sala).emit('bote-actualizado', data.bote);
@@ -164,7 +164,7 @@ io.on('connection', (socket) => {
     }
 
     io.to(sala).emit('jugadores-actualizados', data.jugadores);
-    io.to(sala).emit('bote-actualizado', data.bote);
+    io.to(sala).emit('bote-actualizado', 0);
   });
 
   socket.on('reiniciar-partida', (sala) => {
