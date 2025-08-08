@@ -127,7 +127,7 @@ io.on('connection', (socket) => {
     io.to(sala).emit('juego-detenido');
   });
 
-  socket.on('apostar', (sala) => {
+  socket.on('apostar', ({ sala, cantidad }) => {
     const data = salas[sala];
     if (!data) return;
 
@@ -138,10 +138,11 @@ io.on('connection', (socket) => {
     let cartasActivas = Array.from(data.cartasSeleccionadas).length;
     if (cartasActivas === 0) return;
 
-    if (jugador.monedas >= cartasActivas) {
-      jugador.monedas -= cartasActivas;
-      data.bote += cartasActivas;
-      jugador.apostado = true;
+   if (jugador.monedas >= cantidad) {
+  jugador.monedas -= cantidad;
+  data.bote += cantidad;
+  jugador.apostado = true;
+}
 
       io.to(sala).emit('jugadores-actualizados', data.jugadores);
       io.to(sala).emit('bote-actualizado', data.bote);
