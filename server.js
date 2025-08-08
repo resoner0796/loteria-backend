@@ -13,7 +13,6 @@ const io = new Server(server, {
   }
 });
 
-// Estado global por sala
 const salas = {};
 
 function generarBarajitas() {
@@ -52,14 +51,11 @@ io.on('connection', (socket) => {
       host: esHost,
       monedas: 30,
       apostado: false,
-      cartasSeleccionadas: [] // <-- Se inicializa el array para cada jugador
+      cartasSeleccionadas: []
     };
 
-    // Recopilar todas las cartas seleccionadas de todos los jugadores para desactivarlas
-    let cartasTotalesSeleccionadas = new Set();
-    for (const id in salas[sala].jugadores) {
-      salas[sala].jugadores[id].cartasSeleccionadas.forEach(c => cartasTotalesSeleccionadas.add(c));
-    }
+    const cartasTotalesSeleccionadas = new Set();
+    Object.values(salas[sala].jugadores).forEach(j => j.cartasSeleccionadas.forEach(c => cartasTotalesSeleccionadas.add(c)));
 
     socket.emit('rol-asignado', { host: esHost });
     io.to(sala).emit('cartas-desactivadas', Array.from(cartasTotalesSeleccionadas));
@@ -69,51 +65,45 @@ io.on('connection', (socket) => {
   });
 
   socket.on('seleccionar-carta', ({ sala, carta }) => {
-    if (!salas[sala]) return;
-    const jugador = salas[sala].jugadores[socket.id];
+    const data = salas[sala];
+    if (!data) return;
+
+    const jugador = data.jugadores[socket.id];
     if (jugador && !jugador.cartasSeleccionadas.includes(carta)) {
       jugador.cartasSeleccionadas.push(carta);
     }
 
-    let cartasTotalesSeleccionadas = new Set();
-    for (const id in salas[sala].jugadores) {
-      salas[sala].jugadores[id].cartasSeleccionadas.forEach(c => cartasTotalesSeleccionadas.add(c));
-    }
+    const cartasTotalesSeleccionadas = new Set();
+    Object.values(data.jugadores).forEach(j => j.cartasSeleccionadas.forEach(c => cartasTotalesSeleccionadas.add(c)));
     io.to(sala).emit('cartas-desactivadas', Array.from(cartasTotalesSeleccionadas));
   });
 
   socket.on('barajear', (sala) => {
-    if (!salas[sala]) return;
-    salas[sala].historial = [];
-    salas[sala].barajitas = generarBarajitas();
-    salas[sala].juegoPausado = false;
+    const data = salas[sala];
+    if (!data) return;
+    data.historial = [];
+    data.barajitas = generarBarajitas();
+    data.juegoPausado = false;
     io.to(sala).emit('barajear');
   });
 
   socket.on('iniciar-juego', (sala) => {
     const data = salas[sala];
     if (!data || data.barajeoEnCurso || data.juegoPausado) return;
-
-    if (data.barajitas.length === 0) {
-      data.barajitas = generarBarajitas();
-    }
+    if (data.barajitas.length === 0) data.barajitas = generarBarajitas();
 
     io.to(sala).emit('campana');
-
     setTimeout(() => {
       io.to(sala).emit('corre');
       let index = 0;
       data.barajeoEnCurso = true;
-
       data.intervalo = setInterval(() => {
         if (data.juegoPausado) return;
-
         if (index >= data.barajitas.length) {
           clearInterval(data.intervalo);
           data.barajeoEnCurso = false;
           return;
         }
-
         const carta = data.barajitas[index];
         data.historial.push(carta);
         io.to(sala).emit('carta-cantada', carta);
@@ -123,30 +113,26 @@ io.on('connection', (socket) => {
   });
 
   socket.on('detener-juego', (sala) => {
-    if (!salas[sala]) return;
-    clearInterval(salas[sala].intervalo);
-    salas[sala].barajeoEnCurso = false;
-    salas[sala].juegoPausado = false;
+    const data = salas[sala];
+    if (!data) return;
+    clearInterval(data.intervalo);
+    data.barajeoEnCurso = false;
+    data.juegoPausado = false;
     io.to(sala).emit('juego-detenido');
   });
 
   socket.on('loteria', ({ sala, nickname }) => {
     const data = salas[sala];
     if (!data) return;
-
     data.juegoPausado = true;
     clearInterval(data.intervalo);
     data.barajeoEnCurso = false;
-
     io.to(sala).emit('loteria-anunciada', nickname);
   });
 
   socket.on('confirmar-ganador', ({ sala, ganadorId }) => {
     const data = salas[sala];
-    if (!data || !data.jugadores[ganadorId]) {
-      return;
-    }
-
+    if (!data || !data.jugadores[ganadorId]) return;
     const ganador = data.jugadores[ganadorId];
     ganador.monedas += data.bote;
     data.bote = 0;
@@ -163,7 +149,6 @@ io.on('connection', (socket) => {
   socket.on('apostar', ({ sala, cantidad }) => {
     const data = salas[sala];
     if (!data) return;
-
     const jugador = data.jugadores[socket.id];
     if (!jugador || jugador.apostado) {
       socket.emit('error-apuesta', 'Ya apostaste en esta ronda.');
@@ -179,7 +164,6 @@ io.on('connection', (socket) => {
       jugador.monedas -= cantidad;
       data.bote += cantidad;
       jugador.apostado = true;
-
       io.to(sala).emit('jugadores-actualizados', data.jugadores);
       io.to(sala).emit('bote-actualizado', data.bote);
     } else {
@@ -188,16 +172,17 @@ io.on('connection', (socket) => {
   });
 
   socket.on('reiniciar-partida', (sala) => {
-    if (!salas[sala]) return;
-    salas[sala].historial = [];
-    salas[sala].barajitas = [];
-    salas[sala].barajeoEnCurso = false;
-    salas[sala].juegoPausado = false;
-    salas[sala].bote = 0;
+    const data = salas[sala];
+    if (!data) return;
+    data.historial = [];
+    data.barajitas = [];
+    data.barajeoEnCurso = false;
+    data.juegoPausado = false;
+    data.bote = 0;
 
-    for (const id in salas[sala].jugadores) {
-      salas[sala].jugadores[id].apostado = false;
-      salas[sala].jugadores[id].cartasSeleccionadas = []; // Reiniciar cartas seleccionadas de cada jugador
+    for (const id in data.jugadores) {
+      data.jugadores[id].apostado = false;
+      data.jugadores[id].cartasSeleccionadas = [];
     }
 
     io.to(sala).emit('partida-reiniciada');
@@ -219,7 +204,6 @@ io.on('connection', (socket) => {
           data.jugadores[data.hostId].host = true;
         }
       }
-
       io.to(sala).emit('jugadores-actualizados', data.jugadores);
     });
   });
