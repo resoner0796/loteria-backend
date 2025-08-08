@@ -149,16 +149,22 @@ io.on('connection', (socket) => {
       data.bote += cantidad;
       jugador.apostado = true;
 
+      // ✅ Enviamos solo al jugador que apostó su cantidad actualizada de monedas
+      socket.emit('monedas-actualizado', jugador.monedas); 
+      
+      // ✅ Actualizamos la lista de jugadores para que todos vean quién apostó
       io.to(sala).emit('jugadores-actualizados', Object.values(data.jugadores).map(j => ({
         nickname: j.nickname,
         host: j.host,
         apostado: j.apostado
       })));
+      
+      // ✅ Actualizamos el bote para todos
       io.to(sala).emit('bote-actualizado', data.bote);
     } else {
       socket.emit('error-apuesta', 'No tienes suficientes monedas.');
     }
-  });
+});
 
   socket.on('confirmar-ganador', ({ sala, ganadorId }) => {
     const data = salas[sala];
@@ -176,14 +182,17 @@ io.on('connection', (socket) => {
       data.jugadores[id].apostado = false;
     }
 
+    // ✅ Enviamos al ganador su cantidad actualizada de monedas
+    io.to(ganadorId).emit('monedas-actualizado', ganador.monedas);
+
+    // ✅ Actualizamos la lista de jugadores y el bote para todos
     io.to(sala).emit('jugadores-actualizados', Object.values(data.jugadores).map(j => ({
       nickname: j.nickname,
       host: j.host,
       apostado: j.apostado
     })));
     io.to(sala).emit('bote-actualizado', 0);
-  });
-
+});
   socket.on('reiniciar-partida', (sala) => {
     const salaObj = salas[sala];
     if (!salaObj) return;
