@@ -116,37 +116,92 @@ io.on('connection', (socket) => {
     io.to(sala).emit('juego-detenido');
   });
 
-  socket.on('loteria', ({ sala, nickname }) => {
-    if (!salas[sala]) return;
-    const data = salas[sala];
-    data.juegoPausado = true;
-    clearInterval(data.intervalo);
-    data.barajeoEnCurso = false;
+ // Este es el evento que un jugador emite cuando canta 'Lotería'
+socket.on('loteria', ({ sala, nickname }) => {
+  const data = salas[sala];
+  if (!data) return;
 
-    io.to(sala).emit('loteria-anunciada', nickname);
-    io.to(sala).emit('juego-detenido');
-  });
+  // Detenemos el juego y las emisiones de cartas
+  data.juegoPausado = true;
+  clearInterval(data.intervalo);
+  data.barajeoEnCurso = false;
 
-  socket.on('apostar', ({ sala, cantidad }) => {
-    const data = salas[sala];
-    if (!data) return;
+  // Emitimos el anuncio a todos los jugadores
+  io.to(sala).emit('loteria-anunciada', nickname);
 
-    const jugador = data.jugadores[socket.id];
-    if (!jugador || jugador.apostado) return; // Evita apostar dos veces
+  // NOTA: No es necesario llamar 'juego-detenido' dos veces.
+  // La lógica para la verificación del ganador la vamos a implementar en otro lugar.
+});
 
-    // Contar cartas activas de este jugador
-    let cartasActivas = Array.from(data.cartasSeleccionadas).length;
-    if (cartasActivas === 0) return;
+// Este es el nuevo evento que el host debe emitir para confirmar al ganador
+// La lógica para la verificación (en el cliente) debe disparar este evento.
+socket.on('confirmar-ganador', ({ sala, ganadorId }) => {
+  const data = salas[sala];
+  if (!data || !data.jugadores[ganadorId]) {
+    return;
+  }
 
-   if (jugador.monedas >= cartasActivas) {
-      jugador.monedas -= cartasActivas;
-      data.bote += cartasActivas;
-      jugador.apostado = true;
-     
-      io.to(sala).emit('jugadores-actualizados', data.jugadores);
-      io.to(sala).emit('bote-actualizado', data.bote);
+  // Transferir el bote al ganador
+  const ganador = data.jugadores[ganadorId];
+  ganador.monedas += data.bote;
+  data.bote = 0; // Reiniciar el bote a 0
+
+  // Reiniciar el estado de 'apostado' para todos los jugadores
+  for (const id in data.jugadores) {
+    data.jugadores[id].apostado = false;
+  }
+
+  // Informar a todos los jugadores sobre la actualización
+  io.to(sala).emit('jugadores-actualizados', data.jugadores);
+  io.to(sala).emit('bote-actualizado', 0);
+  io.to(sala).emit('juego-detenido');
+});
+
+// También modifica el evento 'reiniciar-partida' para que reinicie las apuestas
+socket.on('reiniciar-partida', (sala) => {
+  if (!salas[sala]) return;
+  salas[sala].historial = [];
+  salas[sala].cartasSeleccionadas.clear();
+  salas[sala].barajitas = [];
+  salas[sala].barajeoEnCurso = false;
+  salas[sala].juegoPausado = false;
+
+  // Reiniciar apuestas de todos
+  salas[sala].bote = 0;
+  for (const id in salas[sala].jugadores) {
+    salas[sala].jugadores[id].apostado = false;
+  }
+
+  io.to(sala).emit('partida-reiniciada');
+  io.to(sala).emit('bote-actualizado', 0);
+});
+  socket.on('apostar', ({ sala }) => { // El cliente ya no necesita enviar 'cantidad'
+    const data = salas[sala];
+    if (!data) return;
+
+    const jugador = data.jugadores[socket.id];
+    if (!jugador || jugador.apostado) return;
+
+    // Buscar cuántas cartas ha seleccionado el jugador en esta sala
+    // (Asumo que guardas las cartas seleccionadas por jugador, no solo globalmente)
+    const cartasActivas = jugador.cartasSeleccionadas ? jugador.cartasSeleccionadas.length : 0;
+    if (cartasActivas === 0) {
+      socket.emit('error-apuesta', 'No puedes apostar sin tener cartas seleccionadas.');
+      return;
+    }
+
+    if (jugador.monedas >= cartasActivas) {
+      // Lógica de apuesta...
+      jugador.monedas -= cartasActivas;
+      data.bote += cartasActivas;
+      jugador.apostado = true;
+     
+      io.to(sala).emit('jugadores-actualizados', data.jugadores);
+      io.to(sala).emit('bote-actualizado', data.bote);
+    } else {
+      socket.emit('error-apuesta', 'No tienes suficientes monedas.');
     }
-  });
+});
 
   socket.on('verificar-ganador', ({ sala, ganadorId }) => {
     const data = salas[sala];
