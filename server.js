@@ -13,7 +13,6 @@ const io = new Server(server, {
   }
 });
 
-// Estado global por sala
 const salas = {};
 
 function generarBarajitas() {
@@ -59,7 +58,6 @@ io.on('connection', (socket) => {
     socket.emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
     socket.emit('historial-actualizado', salas[sala].historial);
     
-    // ✅ Línea modificada para enviar solo el nickname y el estado de apuesta
     io.to(sala).emit('jugadores-actualizados', Object.values(salas[sala].jugadores).map(j => ({
       nickname: j.nickname,
       host: j.host,
@@ -67,6 +65,8 @@ io.on('connection', (socket) => {
     })));
     
     io.to(sala).emit('bote-actualizado', salas[sala].bote);
+    // ✅ Agregamos esta línea para que cada jugador reciba sus monedas al unirse
+    socket.emit('monedas-actualizado', salas[sala].jugadores[socket.id].monedas); 
   });
 
   socket.on('seleccionar-carta', ({ sala, carta }) => {
@@ -150,21 +150,18 @@ io.on('connection', (socket) => {
       jugador.apostado = true;
 
       // ✅ Enviamos solo al jugador que apostó su cantidad actualizada de monedas
-      socket.emit('monedas-actualizado', jugador.monedas); 
+      socket.emit('monedas-actualizado', jugador.monedas);
       
-      // ✅ Actualizamos la lista de jugadores para que todos vean quién apostó
       io.to(sala).emit('jugadores-actualizados', Object.values(data.jugadores).map(j => ({
         nickname: j.nickname,
         host: j.host,
         apostado: j.apostado
       })));
-      
-      // ✅ Actualizamos el bote para todos
       io.to(sala).emit('bote-actualizado', data.bote);
     } else {
       socket.emit('error-apuesta', 'No tienes suficientes monedas.');
     }
-});
+  });
 
   socket.on('confirmar-ganador', ({ sala, ganadorId }) => {
     const data = salas[sala];
@@ -182,17 +179,17 @@ io.on('connection', (socket) => {
       data.jugadores[id].apostado = false;
     }
 
-    // ✅ Enviamos al ganador su cantidad actualizada de monedas
+    // ✅ Enviamos solo al ganador su cantidad actualizada de monedas
     io.to(ganadorId).emit('monedas-actualizado', ganador.monedas);
 
-    // ✅ Actualizamos la lista de jugadores y el bote para todos
     io.to(sala).emit('jugadores-actualizados', Object.values(data.jugadores).map(j => ({
       nickname: j.nickname,
       host: j.host,
       apostado: j.apostado
     })));
     io.to(sala).emit('bote-actualizado', 0);
-});
+  });
+
   socket.on('reiniciar-partida', (sala) => {
     const salaObj = salas[sala];
     if (!salaObj) return;
@@ -205,6 +202,8 @@ io.on('connection', (socket) => {
     salaObj.bote = 0;
     for (const id in salaObj.jugadores) {
       salaObj.jugadores[id].apostado = false;
+      // ✅ Y actualizamos las monedas para cada jugador que se quede
+      io.to(id).emit('monedas-actualizado', salaObj.jugadores[id].monedas);
     }
 
     io.to(sala).emit('partida-reiniciada');
