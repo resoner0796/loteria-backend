@@ -51,7 +51,7 @@ io.on('connection', (socket) => {
     salas[sala].jugadores[socket.id] = { 
       nickname, 
       host: esHost,
-      monedas: 15, // Monedas iniciales por jugador
+      monedas: 30, // Monedas iniciales por jugador
       apostado: false // Marca si ya apostó en la ronda
     };
 
@@ -142,8 +142,7 @@ io.on('connection', (socket) => {
   jugador.monedas -= cantidad;
   data.bote += cantidad;
   jugador.apostado = true;
-}
-
+     
       io.to(sala).emit('jugadores-actualizados', data.jugadores);
       io.to(sala).emit('bote-actualizado', data.bote);
     }
