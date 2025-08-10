@@ -50,7 +50,7 @@ io.on('connection', (socket) => {
     salas[sala].jugadores[socket.id] = {
       nickname,
       host: esHost,
-      monedas: 30,
+      monedas: 50,
       apostado: false
     };
 
