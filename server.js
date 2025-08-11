@@ -1,3 +1,9 @@
+const admin = require('firebase-admin');
+const serviceAccount = require('./serviceAccountKey.json');
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+const db = admin.firestore();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -21,10 +27,26 @@ function generarBarajitas() {
   return barajas.sort(() => Math.random() - 0.5);
 }
 
+// ----------------------------------------------------
+// 👇 NUEVA FUNCIÓN AGREGADA para guardar datos del jugador en Firestore
+// ----------------------------------------------------
+async function guardarJugador(idJugador, datosJugador) {
+  try {
+    const jugadorRef = db.collection('jugadores').doc(idJugador);
+    await jugadorRef.set(datosJugador, { merge: true });
+    console.log(`Datos del jugador ${idJugador} guardados.`);
+  } catch (error) {
+    console.error("Error al guardar datos del jugador:", error);
+  }
+}
+// ----------------------------------------------------
+// 👆 FIN DE LA NUEVA FUNCIÓN
+// ----------------------------------------------------
+
 io.on('connection', (socket) => {
   console.log(`Jugador conectado: ${socket.id}`);
 
-  socket.on('unirse-sala', ({ sala, nickname }) => {
+  socket.on('unirse-sala', async ({ sala, nickname }) => { // <--- Modificado
     socket.join(sala);
 
     if (!salas[sala]) {
@@ -47,12 +69,36 @@ io.on('connection', (socket) => {
     }
 
     const esHost = socket.id === salas[sala].hostId;
+
+    // ----------------------------------------------------
+    // 👇 NUEVAS LÍNEAS AGREGADAS para cargar/crear jugador de Firestore
+    // ----------------------------------------------------
+    let monedasIniciales = 50;
+    try {
+      const jugadorDoc = await db.collection('jugadores').doc(socket.id).get();
+      if (jugadorDoc.exists) {
+        monedasIniciales = jugadorDoc.data().monedas;
+        console.log(`Jugador ${nickname} cargado con ${monedasIniciales} monedas.`);
+      } else {
+        console.log(`Creando nuevo jugador ${nickname} en Firestore.`);
+        await db.collection('jugadores').doc(socket.id).set({
+          nickname: nickname,
+          monedas: monedasIniciales
+        });
+      }
+    } catch (error) {
+      console.error("Error al acceder a Firestore:", error);
+    }
+    
     salas[sala].jugadores[socket.id] = {
       nickname,
       host: esHost,
-      monedas: 50,
+      monedas: monedasIniciales,
       apostado: false
     };
+    // ----------------------------------------------------
+    // 👆 FIN DE LAS LÍNEAS AGREGADAS
+    // ----------------------------------------------------
 
     socket.emit('rol-asignado', { host: esHost });
     socket.emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
@@ -143,6 +189,14 @@ io.on('connection', (socket) => {
 
       io.to(sala).emit('jugadores-actualizados', data.jugadores);
       io.to(sala).emit('bote-actualizado', data.bote);
+      
+      // ----------------------------------------------------
+      // 👇 NUEVA LÍNEA AGREGADA para guardar en Firestore
+      // ----------------------------------------------------
+      guardarJugador(socket.id, { monedas: jugador.monedas });
+      // ----------------------------------------------------
+      // 👆 FIN DE LA LÍNEA AGREGADA
+      // ----------------------------------------------------
     } else {
       socket.emit('error-apuesta', 'No tienes suficientes monedas.');
     }
@@ -166,6 +220,14 @@ io.on('connection', (socket) => {
 
     io.to(sala).emit('jugadores-actualizados', data.jugadores);
     io.to(sala).emit('bote-actualizado', 0);
+    
+    // ----------------------------------------------------
+    // 👇 NUEVA LÍNEA AGREGADA para guardar en Firestore
+    // ----------------------------------------------------
+    guardarJugador(ganadorId, { monedas: ganador.monedas });
+    // ----------------------------------------------------
+    // 👆 FIN DE LA LÍNEA AGREGADA
+    // ----------------------------------------------------
   });
 
   socket.on('reiniciar-partida', (sala) => {
