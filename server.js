@@ -27,7 +27,7 @@ function generarBarajitas() {
   return barajas.sort(() => Math.random() - 0.5);
 }
 
-// 👇 NUEVA FUNCIÓN CORREGIDA para guardar datos del jugador en Firestore con su nickname
+// Función para guardar datos del jugador en Firestore con su nickname
 async function guardarJugador(nickname, datosJugador) {
   try {
     const jugadorRef = db.collection('jugadores').doc(nickname);
@@ -37,7 +37,6 @@ async function guardarJugador(nickname, datosJugador) {
     console.error("Error al guardar datos del jugador:", error);
   }
 }
-// 👆 FIN DE LA FUNCIÓN CORREGIDA
 
 io.on('connection', (socket) => {
   console.log(`Jugador conectado: ${socket.id}`);
@@ -59,14 +58,14 @@ io.on('connection', (socket) => {
       };
     }
 
+    // Lógica para asignar host y manejar jugadores
     const esHostCustom = nickname.toLowerCase() === `host ${sala.toLowerCase()}`;
     if (esHostCustom || !salas[sala].hostId) {
       salas[sala].hostId = socket.id;
     }
-
     const esHost = socket.id === salas[sala].hostId;
 
-    // 👇 LÍNEAS CORREGIDAS para usar el nickname como identificador
+    // 👇 LÓGICA CORREGIDA para cargar/crear jugador de Firestore y mantener sus datos
     let monedasIniciales = 50;
     try {
       const jugadorDoc = await db.collection('jugadores').doc(nickname).get();
@@ -84,19 +83,22 @@ io.on('connection', (socket) => {
       console.error("Error al acceder a Firestore:", error);
     }
     
+    // Almacenamos al jugador en la sala usando su socket.id, pero con sus datos persistentes
     salas[sala].jugadores[socket.id] = {
       nickname,
       host: esHost,
       monedas: monedasIniciales,
       apostado: false
     };
-    // 👆 FIN DE LAS LÍNEAS CORREGIDAS
 
+    // Actualizamos la lista de jugadores para que el cliente lo vea
+    io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+    io.to(sala).emit('bote-actualizado', salas[sala].bote);
+
+    // Enviamos el rol y las cartas desactivadas específicas del socket
     socket.emit('rol-asignado', { host: esHost });
     socket.emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
     socket.emit('historial-actualizado', salas[sala].historial);
-    io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
-    io.to(sala).emit('bote-actualizado', salas[sala].bote);
   });
 
   socket.on('seleccionar-carta', ({ sala, carta }) => {
@@ -182,9 +184,8 @@ io.on('connection', (socket) => {
       io.to(sala).emit('jugadores-actualizados', data.jugadores);
       io.to(sala).emit('bote-actualizado', data.bote);
       
-      // 👇 LÍNEA CORREGIDA para guardar con el nickname
+      // LÍNEA CORREGIDA: Usamos el nickname para guardar en Firestore
       guardarJugador(jugador.nickname, { monedas: jugador.monedas });
-      // 👆 FIN DE LA LÍNEA CORREGIDA
     } else {
       socket.emit('error-apuesta', 'No tienes suficientes monedas.');
     }
@@ -209,9 +210,8 @@ io.on('connection', (socket) => {
     io.to(sala).emit('jugadores-actualizados', data.jugadores);
     io.to(sala).emit('bote-actualizado', 0);
     
-    // 👇 LÍNEA CORREGIDA para guardar con el nickname
+    // LÍNEA CORREGIDA: Usamos el nickname para guardar en Firestore
     guardarJugador(ganador.nickname, { monedas: ganador.monedas });
-    // 👆 FIN DE LA LÍNEA CORREGIDA
   });
 
   socket.on('reiniciar-partida', (sala) => {
