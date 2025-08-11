@@ -1,18 +1,4 @@
 {
-  "name": "loteria-backend",
-  "version": "1.0.0",
-  "description": "Servidor multijugador para Lotería",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "socket.io": "^4.7.2"
-  }
-}
-
-{
   "name": "mi-servidor-loteria",
   "version": "1.0.0",
   "description": "Servidor para juego de lotería",
