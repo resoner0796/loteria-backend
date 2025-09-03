@@ -130,8 +130,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ✅ LÓGICA MODIFICADA PARA ENVIAR EL ESTADO DEL JUEGO ✅
-  socket.on('loteria', ({ nickname, sala, estadoJuego }) => {
+  socket.on('loteria', ({ nickname, sala }) => {
     if (salas[sala] && salas[sala].juegoIniciado) {
       salas[sala].juegoIniciado = false;
       if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
@@ -143,12 +142,8 @@ io.on('connection', (socket) => {
       };
       salas[sala].pagoRealizado = false;
 
-      // Se emite al host con la información del jugador y su estado de juego
-      io.to(salas[sala].hostId).emit('loteria-anunciada', {
-        nicknameGanador: nickname,
-        idGanador: socket.id,
-        estadoJuego // Se añade el estado del juego para la verificación
-      });
+      // Esto es correcto: se emite solo al host
+      io.to(salas[sala].hostId).emit('loteria-anunciada', nickname, socket.id);
     }
   });
   
