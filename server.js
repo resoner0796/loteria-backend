@@ -36,10 +36,10 @@ io.on('connection', (socket) => {
     } else {
       socket.emit('rol-asignado', { host: false });
     }
-    // Guardar cartas vacías al inicio
     salas[sala].jugadores[socket.id] = { nickname, monedas: 30, apostado: false, cartas: [], id: socket.id };
     console.log(`${nickname} se ha unido a la sala '${sala}'`);
     
+    // Al unirse, enviar el estado actual de las cartas seleccionadas
     const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
     io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
 
@@ -48,20 +48,38 @@ io.on('connection', (socket) => {
     io.to(sala).emit('historial-actualizado', salas[sala].historial);
   });
 
+  // ✅✅✅ LÓGICA CORREGIDA AQUÍ ✅✅✅
   socket.on('seleccionar-carta', ({ carta, sala }) => {
     const salaInfo = salas[sala];
     if (salaInfo && salaInfo.jugadores[socket.id]) {
       const jugador = salaInfo.jugadores[socket.id];
+      // Evitar duplicados y más de 4 cartas
       if (jugador.cartas.length < 4 && !jugador.cartas.includes(carta)) {
         jugador.cartas.push(carta);
+
+        // 1. Recolectar TODAS las cartas seleccionadas de TODOS los jugadores en la sala
         const cartasOcupadas = Object.values(salaInfo.jugadores).flatMap(j => j.cartas);
+
+        // 2. Enviar la lista completa a TODOS en la sala para que desactiven las mismas cartas
         io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
       }
     }
   });
 
   socket.on('apostar', ({ sala, cantidad }) => {
-      // Lógica de apuestas...
+    if (salas[sala] && salas[sala].jugadores[socket.id] && !salas[sala].jugadores[socket.id].apostado) {
+      const jugador = salas[sala].jugadores[socket.id];
+      if (jugador.monedas >= cantidad) {
+        jugador.monedas -= cantidad;
+        salas[sala].bote += cantidad;
+        jugador.apostado = true;
+        io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+        io.to(sala).emit('monedas-actualizado', jugador.monedas);
+        io.to(sala).emit('bote-actualizado', salas[sala].bote);
+      } else {
+        socket.emit('error-apuesta', 'No tienes suficientes monedas.');
+      }
+    }
   });
 
   socket.on('iniciar-juego', (sala) => {
@@ -78,32 +96,63 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ...otros eventos como detener, barajear, reiniciar...
+  socket.on('detener-juego', (sala) => {
+    if (salas[sala] && socket.id === salas[sala].hostId) {
+      salas[sala].juegoIniciado = false;
+      if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+      io.to(sala).emit('juego-detenido');
+    }
+  });
 
-  // --- ✅ EVENTO MODIFICADO PARA RECIBIR Y REENVIAR EL ESTADO DEL JUEGO ✅ ---
+  socket.on('barajear', (sala) => {
+    if (salas[sala] && socket.id === salas[sala].hostId) {
+      salas[sala].baraja = mezclarBaraja();
+      salas[sala].historial = [];
+      io.to(sala).emit('barajear');
+    }
+  });
+
+  socket.on('reiniciar-partida', (sala) => {
+    if (salas[sala] && socket.id === salas[sala].hostId) {
+      salas[sala].juegoIniciado = false;
+      salas[sala].historial = [];
+      salas[sala].bote = 0;
+      salas[sala].loteriaPendiente = null;
+      salas[sala].pagoRealizado = false;
+      if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+      for (const id in salas[sala].jugadores) {
+        salas[sala].jugadores[id].apostado = false;
+        salas[sala].jugadores[id].cartas = [];
+      }
+      io.to(sala).emit('partida-reiniciada');
+      io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+      io.to(sala).emit('bote-actualizado', 0);
+    }
+  });
+
+  // ✅ LÓGICA MODIFICADA PARA ENVIAR EL ESTADO DEL JUEGO ✅
   socket.on('loteria', ({ nickname, sala, estadoJuego }) => {
-    const salaInfo = salas[sala];
-    if (salaInfo && salaInfo.juegoIniciado) {
-      salaInfo.juegoIniciado = false;
-      if (salaInfo.intervaloCartas) clearInterval(salaInfo.intervaloCartas);
+    if (salas[sala] && salas[sala].juegoIniciado) {
+      salas[sala].juegoIniciado = false;
+      if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
 
-      salaInfo.loteriaPendiente = {
+      salas[sala].loteriaPendiente = {
         ganadorId: socket.id,
         nickname,
-        estadoJuego, // Guardamos el estado del juego para referencia
         timestamp: Date.now()
       };
-      salaInfo.pagoRealizado = false;
+      salas[sala].pagoRealizado = false;
 
-      // Enviamos toda la información necesaria al Host para que pueda verificar
-      io.to(salaInfo.hostId).emit('loteria-anunciada', { 
-          nicknameGanador: nickname, 
-          idGanador: socket.id, 
-          estadoJuego 
+      // Se emite al host con la información del jugador y su estado de juego
+      io.to(salas[sala].hostId).emit('loteria-anunciada', {
+        nicknameGanador: nickname,
+        idGanador: socket.id,
+        estadoJuego // Se añade el estado del juego para la verificación
       });
     }
   });
   
+  // Esta lógica ya estaba correcta para manejar el pago.
   socket.on('confirmar-ganador', ({ sala, ganadorId, esValido }) => {
     const salaInfo = salas[sala];
   
@@ -119,7 +168,8 @@ io.on('connection', (socket) => {
     }
   
     if (esValido === false) {
-      console.log(`[SALA: ${sala}] El Host RECHAZÓ la victoria de ${jugadorGanador.nickname}.`);
+      console.log(`[SALA: ${sala}] El Host RECHAZÓ la victoria de ${jugadorGanador.nickname}. El juego continúa.`);
+      
       io.to(sala).emit('ganador-rechazado', ganadorId);
       salaInfo.loteriaPendiente = null;
       salaInfo.juegoIniciado = true;
@@ -153,11 +203,41 @@ io.on('connection', (socket) => {
   });
 
   socket.on('salir-sala', (sala) => {
-    // Lógica para salir de la sala...
+    if (salas[sala] && salas[sala].jugadores[socket.id]) {
+      const nickname = salas[sala].jugadores[socket.id].nickname;
+      socket.leave(sala);
+      delete salas[sala].jugadores[socket.id];
+      console.log(`${nickname} ha dejado la sala '${sala}'`);
+      const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
+      io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
+      io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+      if (Object.keys(salas[sala].jugadores).length === 0) {
+        if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+        delete salas[sala];
+        console.log(`Sala '${sala}' eliminada.`);
+      }
+    }
   });
 
   socket.on('disconnect', () => {
-    // Lógica de desconexión...
+    console.log('Jugador desconectado:', socket.id);
+    for (const sala in salas) {
+      if (salas[sala].jugadores[socket.id]) {
+        const nickname = salas[sala].jugadores[socket.id].nickname;
+        delete salas[sala].jugadores[socket.id];
+        console.log(`${nickname} ha dejado la sala '${sala}'`);
+        
+        const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
+        io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
+
+        io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+        if (Object.keys(salas[sala].jugadores).length === 0) {
+          if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+          delete salas[sala];
+          console.log(`Sala '${sala}' eliminada.`);
+        }
+      }
+    }
   });
 });
 
@@ -178,7 +258,7 @@ function repartirCartas(sala) {
       salaInfo.intervaloCartas = null;
       return;
     }
-    const carta = salaInfo.baraja.shift();
+    const carta = salaInfo.baraja.shift(); // Usamos shift para sacar del inicio y no repetir
     salaInfo.historial.push(carta);
     io.to(sala).emit('carta-cantada', carta);
   }, 4000);
