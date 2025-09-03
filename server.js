@@ -38,17 +38,30 @@ io.on('connection', (socket) => {
     }
     salas[sala].jugadores[socket.id] = { nickname, monedas: 30, apostado: false, cartas: [], id: socket.id };
     console.log(`${nickname} se ha unido a la sala '${sala}'`);
+    
+    // Al unirse, enviar el estado actual de las cartas seleccionadas
+    const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
+    io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
 
     io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
     io.to(sala).emit('bote-actualizado', salas[sala].bote);
     io.to(sala).emit('historial-actualizado', salas[sala].historial);
   });
 
+  // ✅✅✅ LÓGICA CORREGIDA AQUÍ ✅✅✅
   socket.on('seleccionar-carta', ({ carta, sala }) => {
-    if (salas[sala] && salas[sala].jugadores[socket.id]) {
-      const jugador = salas[sala].jugadores[socket.id];
-      if (jugador.cartas.length < 4) {
+    const salaInfo = salas[sala];
+    if (salaInfo && salaInfo.jugadores[socket.id]) {
+      const jugador = salaInfo.jugadores[socket.id];
+      // Evitar duplicados y más de 4 cartas
+      if (jugador.cartas.length < 4 && !jugador.cartas.includes(carta)) {
         jugador.cartas.push(carta);
+
+        // 1. Recolectar TODAS las cartas seleccionadas de TODOS los jugadores en la sala
+        const cartasOcupadas = Object.values(salaInfo.jugadores).flatMap(j => j.cartas);
+
+        // 2. Enviar la lista completa a TODOS en la sala para que desactiven las mismas cartas
+        io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
       }
     }
   });
@@ -129,16 +142,15 @@ io.on('connection', (socket) => {
       };
       salas[sala].pagoRealizado = false;
 
+      // Esto es correcto: se emite solo al host
       io.to(salas[sala].hostId).emit('loteria-anunciada', nickname, socket.id);
     }
   });
   
-  // ✅✅✅ CÓDIGO CORREGIDO ✅✅✅
+  // Esta lógica ya estaba correcta para manejar el pago.
   socket.on('confirmar-ganador', ({ sala, ganadorId, esValido }) => {
     const salaInfo = salas[sala];
   
-    // --- 1. Validaciones ---
-    // (Estas validaciones están bien, aseguran que solo el host pueda confirmar una victoria válida y pendiente)
     if (!salaInfo || socket.id !== salaInfo.hostId || !salaInfo.loteriaPendiente || salaInfo.pagoRealizado || ganadorId !== salaInfo.loteriaPendiente.ganadorId) {
       console.warn(`[SALA: ${sala}] Intento de confirmación inválido.`);
       return;
@@ -150,46 +162,29 @@ io.on('connection', (socket) => {
       return;
     }
   
-    // --- 2. Lógica de Decisión (Aceptar vs Rechazar) ---
-  
-    // CASO B: El Host RECHAZA la victoria (esValido es false)
     if (esValido === false) {
       console.log(`[SALA: ${sala}] El Host RECHAZÓ la victoria de ${jugadorGanador.nickname}. El juego continúa.`);
       
-      // Notificamos a todos que la victoria fue rechazada.
       io.to(sala).emit('ganador-rechazado', ganadorId);
-  
-      // Limpiamos el estado de "victoria pendiente" para que alguien más pueda ganar.
       salaInfo.loteriaPendiente = null;
-      
-      // Reanudamos el juego.
       salaInfo.juegoIniciado = true;
-      repartirCartas(sala); // Función que sigue sacando cartas.
-      
-      // ***** LA CORRECCIÓN CLAVE *****
-      // Usamos 'return' para detener la ejecución aquí. 
-      // Si no lo hiciéramos, el código continuaría y pagaría el bote incorrectamente.
+      repartirCartas(sala); 
       return; 
     }
   
-    // CASO A: El Host ACEPTA la victoria (esValido es true)
-    // Si el código llega a este punto, significa que la victoria fue aceptada.
     const boteActual = Number(salaInfo.bote) || 0;
     console.log(`[SALA: ${sala}] El Host ACEPTÓ la victoria de ${jugadorGanador.nickname}.`);
   
-    // Transferimos el bote al ganador.
     if (boteActual > 0) {
       jugadorGanador.monedas += boteActual;
       salaInfo.bote = 0;
-      salaInfo.pagoRealizado = true; // Marcamos que el pago se hizo para evitar dobles pagos.
+      salaInfo.pagoRealizado = true;
     }
   
-    // Reiniciamos el estado de apuesta de todos para la siguiente ronda.
     for (const id in salaInfo.jugadores) {
       salaInfo.jugadores[id].apostado = false;
     }
   
-    // Limpiamos la victoria pendiente y detenemos el juego.
     salaInfo.loteriaPendiente = null;
     salaInfo.juegoIniciado = false;
     if (salaInfo.intervaloCartas) {
@@ -197,19 +192,19 @@ io.on('connection', (socket) => {
       salaInfo.intervaloCartas = null;
     }
   
-    // Notificamos a todos los clientes sobre el resultado final.
     io.to(sala).emit('ganador-confirmado', ganadorId);
     io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores);
     io.to(sala).emit('bote-actualizado', salaInfo.bote);
   });
 
-  
   socket.on('salir-sala', (sala) => {
     if (salas[sala] && salas[sala].jugadores[socket.id]) {
       const nickname = salas[sala].jugadores[socket.id].nickname;
       socket.leave(sala);
       delete salas[sala].jugadores[socket.id];
       console.log(`${nickname} ha dejado la sala '${sala}'`);
+      const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
+      io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
       io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
       if (Object.keys(salas[sala].jugadores).length === 0) {
         if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
@@ -226,6 +221,10 @@ io.on('connection', (socket) => {
         const nickname = salas[sala].jugadores[socket.id].nickname;
         delete salas[sala].jugadores[socket.id];
         console.log(`${nickname} ha dejado la sala '${sala}'`);
+        
+        const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
+        io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
+
         io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
         if (Object.keys(salas[sala].jugadores).length === 0) {
           if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
@@ -246,19 +245,17 @@ function repartirCartas(sala) {
   const salaInfo = salas[sala];
   if (!salaInfo || !salaInfo.juegoIniciado) return;
 
-  let index = 0;
   if (salaInfo.intervaloCartas) clearInterval(salaInfo.intervaloCartas);
 
   salaInfo.intervaloCartas = setInterval(() => {
-    if (!salaInfo.juegoIniciado || index >= salaInfo.baraja.length) {
+    if (!salaInfo.juegoIniciado || salaInfo.baraja.length === 0) {
       clearInterval(salaInfo.intervaloCartas);
       salaInfo.intervaloCartas = null;
       return;
     }
-    const carta = salaInfo.baraja[index++];
+    const carta = salaInfo.baraja.shift(); // Usamos shift para sacar del inicio y no repetir
     salaInfo.historial.push(carta);
     io.to(sala).emit('carta-cantada', carta);
-    io.to(sala).emit('historial-actualizado', salaInfo.historial);
   }, 4000);
 }
 
