@@ -39,7 +39,6 @@ io.on('connection', (socket) => {
     salas[sala].jugadores[socket.id] = { nickname, monedas: 30, apostado: false, cartas: [], id: socket.id };
     console.log(`${nickname} se ha unido a la sala '${sala}'`);
     
-    // Al unirse, enviar el estado actual de las cartas seleccionadas
     const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
     io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
 
@@ -48,19 +47,13 @@ io.on('connection', (socket) => {
     io.to(sala).emit('historial-actualizado', salas[sala].historial);
   });
 
-  // ✅✅✅ LÓGICA CORREGIDA AQUÍ ✅✅✅
   socket.on('seleccionar-carta', ({ carta, sala }) => {
     const salaInfo = salas[sala];
     if (salaInfo && salaInfo.jugadores[socket.id]) {
       const jugador = salaInfo.jugadores[socket.id];
-      // Evitar duplicados y más de 4 cartas
       if (jugador.cartas.length < 4 && !jugador.cartas.includes(carta)) {
         jugador.cartas.push(carta);
-
-        // 1. Recolectar TODAS las cartas seleccionadas de TODOS los jugadores en la sala
         const cartasOcupadas = Object.values(salaInfo.jugadores).flatMap(j => j.cartas);
-
-        // 2. Enviar la lista completa a TODOS en la sala para que desactiven las mismas cartas
         io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
       }
     }
@@ -130,7 +123,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('loteria', ({ nickname, sala }) => {
+  // ✅✅✅ LÓGICA MEJORADA AQUÍ ✅✅✅
+  socket.on('loteria', ({ nickname, sala, boardState }) => {
     if (salas[sala] && salas[sala].juegoIniciado) {
       salas[sala].juegoIniciado = false;
       if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
@@ -138,16 +132,16 @@ io.on('connection', (socket) => {
       salas[sala].loteriaPendiente = {
         ganadorId: socket.id,
         nickname,
+        boardState, // Guardamos el estado del tablero del jugador
         timestamp: Date.now()
       };
       salas[sala].pagoRealizado = false;
 
-      // Esto es correcto: se emite solo al host
-      io.to(salas[sala].hostId).emit('loteria-anunciada', nickname, socket.id);
+      // Enviamos el estado del tablero al host para verificación
+      io.to(salas[sala].hostId).emit('loteria-anunciada', nickname, socket.id, boardState);
     }
   });
   
-  // Esta lógica ya estaba correcta para manejar el pago.
   socket.on('confirmar-ganador', ({ sala, ganadorId, esValido }) => {
     const salaInfo = salas[sala];
   
@@ -253,7 +247,7 @@ function repartirCartas(sala) {
       salaInfo.intervaloCartas = null;
       return;
     }
-    const carta = salaInfo.baraja.shift(); // Usamos shift para sacar del inicio y no repetir
+    const carta = salaInfo.baraja.shift();
     salaInfo.historial.push(carta);
     io.to(sala).emit('carta-cantada', carta);
   }, 4000);
