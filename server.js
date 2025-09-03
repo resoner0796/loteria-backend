@@ -1,262 +1,267 @@
-const admin = require('firebase-admin');
-const serviceAccount = JSON.parse(process.env.nicknames);
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
-
-const db = admin.firestore();
 const express = require('express');
-const http = require('http');
-const cors = require('cors');
-const { Server } = require('socket.io');
-
 const app = express();
-const server = http.createServer(app);
-
-const io = new Server(server, {
-  cors: {
-    origin: "https://resoner0796.github.io",
-    methods: ["GET", "POST"]
-  }
-});
-
-const salas = {};
-
-function generarBarajitas() {
-  const total = 54;
-  const barajas = Array.from({ length: total }, (_, i) => String(i + 1).padStart(2, '0'));
-  return barajas.sort(() => Math.random() - 0.5);
-}
-
-// Función para guardar datos del jugador en Firestore con su nickname
-async function guardarJugador(nickname, datosJugador) {
-  try {
-    const jugadorRef = db.collection('jugadores').doc(nickname);
-    await jugadorRef.set(datosJugador, { merge: true });
-    console.log(`Datos del jugador ${nickname} guardados.`);
-  } catch (error) {
-    console.error("Error al guardar datos del jugador:", error);
-  }
-}
-
-io.on('connection', (socket) => {
-  console.log(`Jugador conectado: ${socket.id}`);
-
-  socket.on('unirse-sala', async ({ sala, nickname }) => {
-    socket.join(sala);
-
-    if (!salas[sala]) {
-      salas[sala] = {
-        jugadores: {},
-        hostId: null,
-        cartasSeleccionadas: new Set(),
-        historial: [],
-        barajitas: [],
-        barajeoEnCurso: false,
-        intervalo: null,
-        juegoPausado: false,
-        bote: 0
-      };
-    }
-
-    const esHostCustom = nickname.toLowerCase() === `host ${sala.toLowerCase()}`;
-    if (esHostCustom || !salas[sala].hostId) {
-      salas[sala].hostId = socket.id;
-    }
-    const esHost = socket.id === salas[sala].hostId;
-
-    let monedasIniciales = 50;
-    try {
-      const jugadorDoc = await db.collection('jugadores').doc(nickname).get();
-      if (jugadorDoc.exists) {
-        monedasIniciales = jugadorDoc.data().monedas;
-      } else {
-        await db.collection('jugadores').doc(nickname).set({
-          nickname: nickname,
-          monedas: monedasIniciales
-        });
-      }
-    } catch (error) {
-      console.error("Error al acceder a Firestore:", error);
-    }
-    
-    salas[sala].jugadores[socket.id] = {
-      nickname,
-      host: esHost,
-      monedas: monedasIniciales,
-      apostado: false
-    };
-
-    io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
-    io.to(sala).emit('bote-actualizado', salas[sala].bote);
-    socket.emit('rol-asignado', { host: esHost });
-    socket.emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
-    socket.emit('historial-actualizado', salas[sala].historial);
-  });
-
-  socket.on('seleccionar-carta', ({ sala, carta }) => {
-    if (!salas[sala]) return;
-    salas[sala].cartasSeleccionadas.add(carta);
-    io.to(sala).emit('cartas-desactivadas', Array.from(salas[sala].cartasSeleccionadas));
-  });
-
-  socket.on('barajear', (sala) => {
-    const salaObj = salas[sala];
-    if (!salaObj) return;
-    salaObj.historial = [];
-    salaObj.barajitas = generarBarajitas();
-    salaObj.juegoPausado = false;
-    io.to(sala).emit('barajear');
-    io.to(sala).emit('historial-actualizado', salaObj.historial);
-  });
-
-  socket.on('iniciar-juego', (sala) => {
-    const data = salas[sala];
-    if (!data || data.barajeoEnCurso || data.juegoPausado) return;
-
-    if (data.barajitas.length === 0) {
-      data.barajitas = generarBarajitas();
-    }
-
-    io.to(sala).emit('campana');
-
-    setTimeout(() => {
-      io.to(sala).emit('corre');
-      let index = 0;
-      data.barajeoEnCurso = true;
-
-      data.intervalo = setInterval(() => {
-        if (data.juegoPausado) return;
-
-        if (index >= data.barajitas.length) {
-          clearInterval(data.intervalo);
-          data.barajeoEnCurso = false;
-          return;
-        }
-
-        const carta = data.barajitas[index];
-        data.historial.push(carta);
-        io.to(sala).emit('carta-cantada', carta);
-        index++;
-      }, 5000);
-    }, 2000);
-  });
-
-  socket.on('detener-juego', (sala) => {
-    if (!salas[sala]) return;
-    clearInterval(salas[sala].intervalo);
-    salas[sala].barajeoEnCurso = false;
-    salas[sala].juegoPausado = true;
-    io.to(sala).emit('juego-detenido');
-  });
-
-  socket.on('loteria', ({ sala, nickname }) => {
-    if (!salas[sala]) return;
-    const data = salas[sala];
-    data.juegoPausado = true;
-    clearInterval(data.intervalo);
-    data.barajeoEnCurso = false;
-
-    io.to(sala).emit('loteria-anunciada', nickname, socket.id);
-    io.to(sala).emit('juego-detenido');
-  });
-
-  socket.on('apostar', ({ sala, cantidad }) => {
-    const data = salas[sala];
-    if (!data) return;
-
-    const jugador = data.jugadores[socket.id];
-    if (!jugador) return socket.emit('error-apuesta', 'No estás en una sala.');
-    if (jugador.apostado) return socket.emit('error-apuesta', 'Ya apostaste en esta ronda.');
-
-    if (jugador.monedas >= cantidad) {
-      jugador.monedas -= cantidad;
-      data.bote += cantidad;
-      jugador.apostado = true;
-
-      io.to(sala).emit('jugadores-actualizados', data.jugadores);
-      io.to(sala).emit('bote-actualizado', data.bote);
-      
-      guardarJugador(jugador.nickname, { monedas: jugador.monedas });
-    } else {
-      socket.emit('error-apuesta', 'No tienes suficientes monedas.');
-    }
-  });
-
-  socket.on('confirmar-ganador', ({ sala, ganadorId }) => {
-    const data = salas[sala];
-    if (!data) return;
-
-    const ganador = data.jugadores[ganadorId];
-    if (!ganador) return;
-
-    if (socket.id !== data.hostId) return;
-
-    ganador.monedas += data.bote;
-    data.bote = 0;
-
-    for (const id in data.jugadores) {
-      data.jugadores[id].apostado = false;
-    }
-
-    io.to(sala).emit('jugadores-actualizados', data.jugadores);
-    io.to(sala).emit('bote-actualizado', 0);
-    
-    guardarJugador(ganador.nickname, { monedas: ganador.monedas });
-  });
-
-  socket.on('reiniciar-partida', (sala) => {
-    const salaObj = salas[sala];
-    if (!salaObj) return;
-    salaObj.historial = [];
-    salaObj.cartasSeleccionadas.clear();
-    salaObj.barajitas = [];
-    salaObj.barajeoEnCurso = false;
-    salaObj.juegoPausado = false;
-
-    salaObj.bote = 0;
-    for (const id in salaObj.jugadores) {
-      salaObj.jugadores[id].apostado = false;
-    }
-
-    io.to(sala).emit('partida-reiniciada');
-    io.to(sala).emit('jugadores-actualizados', salaObj.jugadores);
-    io.to(sala).emit('bote-actualizado', 0);
-  });
-
-  socket.on('disconnecting', () => {
-    const salasUsuario = Array.from(socket.rooms).filter(s => s !== socket.id);
-
-    salasUsuario.forEach(sala => {
-      const data = salas[sala];
-      if (!data || !data.jugadores[socket.id]) return;
-
-      delete data.jugadores[socket.id];
-
-      if (socket.id === data.hostId) {
-        const nuevosJugadores = Object.keys(data.jugadores);
-        data.hostId = nuevosJugadores[0] || null;
-        if (data.hostId) {
-          data.jugadores[data.hostId].host = true;
-        }
-      }
-
-      io.to(sala).emit('jugadores-actualizados', data.jugadores);
-    });
-  });
-
-  socket.on('disconnect', () => {
-    console.log(`Jugador desconectado: ${socket.id}`);
-  });
-});
-
-app.use(cors());
-
-app.get('/', (req, res) => {
-  res.send('🎯 Servidor de Lotería funcionando con múltiples salas + apuestas');
+const http = require('http').createServer(app);
+const io = require('socket.io')(http, {
+  cors: { origin: '*' }
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Servidor corriendo en el puerto ${PORT}`);
+
+// Estado del juego por sala
+const salas = {};
+
+app.get('/', (req, res) => {
+  res.send('Servidor de Lotería funcionando.');
+});
+
+io.on('connection', (socket) => {
+  console.log('Nuevo jugador conectado:', socket.id);
+
+  socket.on('unirse-sala', ({ nickname, sala }) => {
+    socket.join(sala);
+    if (!salas[sala]) {
+      salas[sala] = {
+        jugadores: {},
+        baraja: [],
+        historial: [],
+        juegoIniciado: false,
+        bote: 0,
+        hostId: socket.id,
+        intervaloCartas: null,
+        loteriaPendiente: null,
+        pagoRealizado: false
+      };
+      console.log(`Sala '${sala}' creada por ${nickname} (${socket.id})`);
+      socket.emit('rol-asignado', { host: true });
+    } else {
+      socket.emit('rol-asignado', { host: false });
+    }
+    salas[sala].jugadores[socket.id] = { nickname, monedas: 30, apostado: false, cartas: [], id: socket.id };
+    console.log(`${nickname} se ha unido a la sala '${sala}'`);
+
+    io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+    io.to(sala).emit('bote-actualizado', salas[sala].bote);
+    io.to(sala).emit('historial-actualizado', salas[sala].historial);
+  });
+
+  socket.on('seleccionar-carta', ({ carta, sala }) => {
+    if (salas[sala] && salas[sala].jugadores[socket.id]) {
+      const jugador = salas[sala].jugadores[socket.id];
+      if (jugador.cartas.length < 4) {
+        jugador.cartas.push(carta);
+      }
+    }
+  });
+
+  socket.on('apostar', ({ sala, cantidad }) => {
+    if (salas[sala] && salas[sala].jugadores[socket.id] && !salas[sala].jugadores[socket.id].apostado) {
+      const jugador = salas[sala].jugadores[socket.id];
+      if (jugador.monedas >= cantidad) {
+        jugador.monedas -= cantidad;
+        salas[sala].bote += cantidad;
+        jugador.apostado = true;
+        io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+        io.to(sala).emit('monedas-actualizado', jugador.monedas);
+        io.to(sala).emit('bote-actualizado', salas[sala].bote);
+      } else {
+        socket.emit('error-apuesta', 'No tienes suficientes monedas.');
+      }
+    }
+  });
+
+  socket.on('iniciar-juego', (sala) => {
+    if (salas[sala] && socket.id === salas[sala].hostId) {
+      if (!salas[sala].juegoIniciado) {
+        salas[sala].baraja = mezclarBaraja();
+        salas[sala].historial = [];
+        salas[sala].juegoIniciado = true;
+        salas[sala].loteriaPendiente = null;
+        salas[sala].pagoRealizado = false;
+        io.to(sala).emit('juego-iniciado');
+        repartirCartas(sala);
+      }
+    }
+  });
+
+  socket.on('detener-juego', (sala) => {
+    if (salas[sala] && socket.id === salas[sala].hostId) {
+      salas[sala].juegoIniciado = false;
+      if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+      io.to(sala).emit('juego-detenido');
+    }
+  });
+
+  socket.on('barajear', (sala) => {
+    if (salas[sala] && socket.id === salas[sala].hostId) {
+      salas[sala].baraja = mezclarBaraja();
+      salas[sala].historial = [];
+      io.to(sala).emit('barajear');
+    }
+  });
+
+  socket.on('reiniciar-partida', (sala) => {
+    if (salas[sala] && socket.id === salas[sala].hostId) {
+      salas[sala].juegoIniciado = false;
+      salas[sala].historial = [];
+      salas[sala].bote = 0;
+      salas[sala].loteriaPendiente = null;
+      salas[sala].pagoRealizado = false;
+      if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+      for (const id in salas[sala].jugadores) {
+        salas[sala].jugadores[id].apostado = false;
+        salas[sala].jugadores[id].cartas = [];
+      }
+      io.to(sala).emit('partida-reiniciada');
+      io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+      io.to(sala).emit('bote-actualizado', 0);
+    }
+  });
+
+  socket.on('loteria', ({ nickname, sala }) => {
+    if (salas[sala] && salas[sala].juegoIniciado) {
+      salas[sala].juegoIniciado = false;
+      if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+
+      salas[sala].loteriaPendiente = {
+        ganadorId: socket.id,
+        nickname,
+        timestamp: Date.now()
+      };
+      salas[sala].pagoRealizado = false;
+
+      io.to(salas[sala].hostId).emit('loteria-anunciada', nickname, socket.id);
+    }
+  });
+  
+  // ✅✅✅ CÓDIGO CORREGIDO ✅✅✅
+  socket.on('confirmar-ganador', ({ sala, ganadorId, esValido }) => {
+    const salaInfo = salas[sala];
+  
+    // --- 1. Validaciones ---
+    // (Estas validaciones están bien, aseguran que solo el host pueda confirmar una victoria válida y pendiente)
+    if (!salaInfo || socket.id !== salaInfo.hostId || !salaInfo.loteriaPendiente || salaInfo.pagoRealizado || ganadorId !== salaInfo.loteriaPendiente.ganadorId) {
+      console.warn(`[SALA: ${sala}] Intento de confirmación inválido.`);
+      return;
+    }
+  
+    const jugadorGanador = salaInfo.jugadores[ganadorId];
+    if (!jugadorGanador) {
+      console.error(`[SALA: ${sala}] Error: El jugador con ID ${ganadorId} no fue encontrado.`);
+      return;
+    }
+  
+    // --- 2. Lógica de Decisión (Aceptar vs Rechazar) ---
+  
+    // CASO B: El Host RECHAZA la victoria (esValido es false)
+    if (esValido === false) {
+      console.log(`[SALA: ${sala}] El Host RECHAZÓ la victoria de ${jugadorGanador.nickname}. El juego continúa.`);
+      
+      // Notificamos a todos que la victoria fue rechazada.
+      io.to(sala).emit('ganador-rechazado', ganadorId);
+  
+      // Limpiamos el estado de "victoria pendiente" para que alguien más pueda ganar.
+      salaInfo.loteriaPendiente = null;
+      
+      // Reanudamos el juego.
+      salaInfo.juegoIniciado = true;
+      repartirCartas(sala); // Función que sigue sacando cartas.
+      
+      // ***** LA CORRECCIÓN CLAVE *****
+      // Usamos 'return' para detener la ejecución aquí. 
+      // Si no lo hiciéramos, el código continuaría y pagaría el bote incorrectamente.
+      return; 
+    }
+  
+    // CASO A: El Host ACEPTA la victoria (esValido es true)
+    // Si el código llega a este punto, significa que la victoria fue aceptada.
+    const boteActual = Number(salaInfo.bote) || 0;
+    console.log(`[SALA: ${sala}] El Host ACEPTÓ la victoria de ${jugadorGanador.nickname}.`);
+  
+    // Transferimos el bote al ganador.
+    if (boteActual > 0) {
+      jugadorGanador.monedas += boteActual;
+      salaInfo.bote = 0;
+      salaInfo.pagoRealizado = true; // Marcamos que el pago se hizo para evitar dobles pagos.
+    }
+  
+    // Reiniciamos el estado de apuesta de todos para la siguiente ronda.
+    for (const id in salaInfo.jugadores) {
+      salaInfo.jugadores[id].apostado = false;
+    }
+  
+    // Limpiamos la victoria pendiente y detenemos el juego.
+    salaInfo.loteriaPendiente = null;
+    salaInfo.juegoIniciado = false;
+    if (salaInfo.intervaloCartas) {
+      clearInterval(salaInfo.intervaloCartas);
+      salaInfo.intervaloCartas = null;
+    }
+  
+    // Notificamos a todos los clientes sobre el resultado final.
+    io.to(sala).emit('ganador-confirmado', ganadorId);
+    io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores);
+    io.to(sala).emit('bote-actualizado', salaInfo.bote);
+  });
+
+  
+  socket.on('salir-sala', (sala) => {
+    if (salas[sala] && salas[sala].jugadores[socket.id]) {
+      const nickname = salas[sala].jugadores[socket.id].nickname;
+      socket.leave(sala);
+      delete salas[sala].jugadores[socket.id];
+      console.log(`${nickname} ha dejado la sala '${sala}'`);
+      io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+      if (Object.keys(salas[sala].jugadores).length === 0) {
+        if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+        delete salas[sala];
+        console.log(`Sala '${sala}' eliminada.`);
+      }
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log('Jugador desconectado:', socket.id);
+    for (const sala in salas) {
+      if (salas[sala].jugadores[socket.id]) {
+        const nickname = salas[sala].jugadores[socket.id].nickname;
+        delete salas[sala].jugadores[socket.id];
+        console.log(`${nickname} ha dejado la sala '${sala}'`);
+        io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+        if (Object.keys(salas[sala].jugadores).length === 0) {
+          if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+          delete salas[sala];
+          console.log(`Sala '${sala}' eliminada.`);
+        }
+      }
+    }
+  });
+});
+
+function mezclarBaraja() {
+  const cartas = Array.from({ length: 54 }, (_, i) => String(i + 1).padStart(2, '0'));
+  return cartas.sort(() => Math.random() - 0.5);
+}
+
+function repartirCartas(sala) {
+  const salaInfo = salas[sala];
+  if (!salaInfo || !salaInfo.juegoIniciado) return;
+
+  let index = 0;
+  if (salaInfo.intervaloCartas) clearInterval(salaInfo.intervaloCartas);
+
+  salaInfo.intervaloCartas = setInterval(() => {
+    if (!salaInfo.juegoIniciado || index >= salaInfo.baraja.length) {
+      clearInterval(salaInfo.intervaloCartas);
+      salaInfo.intervaloCartas = null;
+      return;
+    }
+    const carta = salaInfo.baraja[index++];
+    salaInfo.historial.push(carta);
+    io.to(sala).emit('carta-cantada', carta);
+    io.to(sala).emit('historial-actualizado', salaInfo.historial);
+  }, 4000);
+}
+
+http.listen(PORT, () => {
+  console.log(`Servidor corriendo en puerto ${PORT}`);
 });
