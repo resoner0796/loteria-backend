@@ -46,7 +46,7 @@ function repartirCartas(sala) {
     const carta = salaInfo.baraja.shift();
     salaInfo.historial.push(carta);
     io.to(sala).emit('carta-cantada', carta);
-  }, 4000);
+  }, 6000);
 }
 
 // Guardar datos de jugador en Firestore
