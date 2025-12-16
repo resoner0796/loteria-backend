@@ -130,7 +130,9 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('apostar', async ({ sala, cantidad }) => {
+  // En server.js - Modifica la sección de 'apostar'
+
+socket.on('apostar', async ({ sala, cantidad }) => {
     if (salas[sala] && salas[sala].jugadores[socket.id] && !salas[sala].jugadores[socket.id].apostado) {
       const jugador = salas[sala].jugadores[socket.id];
       if (jugador.monedas >= cantidad) {
@@ -138,11 +140,17 @@ io.on('connection', (socket) => {
         salas[sala].bote += cantidad;
         jugador.apostado = true;
 
+        // ESTA LÍNEA ES LA CLAVE DE LA SOLUCIÓN:
+        // Usamos 'jugadores-actualizados' para que cada quien busque su propio saldo en la lista.
         io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
-        io.to(sala).emit('monedas-actualizado', jugador.monedas);
+        
+        // --- BORRA O COMENTA ESTA LÍNEA QUE CAUSA EL BUG ---
+        // io.to(sala).emit('monedas-actualizado', jugador.monedas); 
+        // ---------------------------------------------------
+
         io.to(sala).emit('bote-actualizado', salas[sala].bote);
 
-        // 🔹 Guardar cambios en Firebase
+        // Guardar cambios en Firebase
         await guardarJugador(jugador.nickname, { monedas: jugador.monedas });
       } else {
         socket.emit('error-apuesta', 'No tienes suficientes monedas.');
@@ -150,19 +158,40 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('iniciar-juego', (sala) => {
-    if (salas[sala] && socket.id === salas[sala].hostId) {
-      if (!salas[sala].juegoIniciado) {
-        salas[sala].baraja = mezclarBaraja();
-        salas[sala].historial = [];
-        salas[sala].juegoIniciado = true;
-        salas[sala].loteriaPendiente = null;
-        salas[sala].pagoRealizado = false;
-        io.to(sala).emit('juego-iniciado');
-        repartirCartas(sala);
-      }
+  // En server.js
+
+socket.on('iniciar-juego', (sala) => {
+  if (salas[sala] && socket.id === salas[sala].hostId) {
+    if (!salas[sala].juegoIniciado) {
+      // 1. Preparamos el juego
+      salas[sala].baraja = mezclarBaraja();
+      salas[sala].historial = [];
+      salas[sala].juegoIniciado = true;
+      salas[sala].loteriaPendiente = null;
+      salas[sala].pagoRealizado = false;
+      
+      // 2. Avisamos que inicia (opcional) y tocamos CAMPANA
+      io.to(sala).emit('juego-iniciado');
+      io.to(sala).emit('campana'); // <--- ¡IMPORTANTE!
+
+      console.log(`Sala ${sala}: Iniciando secuencia de arranque...`);
+
+      // 3. Esperamos 2 segundos y mandamos "CORRE Y SE VA"
+      setTimeout(() => {
+          if(salas[sala] && salas[sala].juegoIniciado) {
+             io.to(sala).emit('corre'); // <--- ¡IMPORTANTE!
+          }
+      }, 2000);
+
+      // 4. Esperamos otros 3 segundos (lo que dura el audio de "corre") y empezamos a dar cartas
+      setTimeout(() => {
+          if(salas[sala] && salas[sala].juegoIniciado) {
+             repartirCartas(sala); // <--- Aquí ya arrancan las cartas
+          }
+      }, 5000); 
     }
-  });
+  }
+});
 
   socket.on('detener-juego', (sala) => {
     if (salas[sala] && socket.id === salas[sala].hostId) {
