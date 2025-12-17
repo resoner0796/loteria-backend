@@ -57,7 +57,7 @@ app.post('/api/registro', async (req, res) => {
             email,
             password: hashedPassword,
             nickname,
-            monedas: 50, // Bono de bienvenida
+            monedas: 20, // Bono de bienvenida
             creado: new Date()
         });
 
@@ -416,26 +416,53 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     // PROTECCIÓN DE DESCONEXIÓN:
-    // No borramos al jugador inmediatamente para darle chance de volver.
-    // Solo lo sacamos si pasa mucho tiempo o si la sala se vacía.
     console.log('Jugador desconectado (esperando posible reconexión):', socket.id);
     
-    // Dejamos un timeout de limpieza por si acaso nunca vuelve
+    // Dejamos un timeout de 10 segundos antes de declararlo "muerto"
     setTimeout(() => {
-        // En un sistema más complejo verificaríamos si ya se reconectó con otro socket.
-        // Por ahora, dejamos que la lógica de limpieza de salas lo maneje si todos se van.
         for (const sala in salas) {
+            // Buscamos si el ID VIEJO sigue en la sala.
+            // Si el jugador se reconectó, la función 'reconectar' ya habría cambiado su ID 
+            // y borrado este ID viejo, por lo que este IF daría falso y no pasaría nada (éxito).
             if (salas[sala].jugadores[socket.id]) {
-                // Si sigue aquí con el MISMO id viejo, es que no volvió. Borramos.
-                // Pero si ya se reconectó, este socket.id ya no existe en la sala (fue reemplazado).
-                const nick = salas[sala].jugadores[socket.id].nickname;
+                
+                // === SI ENTRAMOS AQUÍ, ES QUE NO VOLVIÓ ===
+                const jugadorSaliente = salas[sala].jugadores[socket.id];
+                const eraHost = (salas[sala].hostId === socket.id); // ¿Era el Host?
+
+                // 1. Lo borramos definitivamente
                 delete salas[sala].jugadores[socket.id];
-                io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+                console.log(`❌ ${jugadorSaliente.nickname} eliminado de ${sala} tras timeout.`);
+
+                // 2. Verificamos si la sala quedó vacía
+                if (Object.keys(salas[sala].jugadores).length === 0) {
+                    if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+                    delete salas[sala];
+                    console.log(`🗑️ Sala '${sala}' eliminada por inactividad.`);
+                } else {
+                    // 3. LA SALA SIGUE VIVA: MIGRACIÓN DE HOST
+                    if (eraHost) {
+                        const idsRestantes = Object.keys(salas[sala].jugadores);
+                        if (idsRestantes.length > 0) {
+                            // El heredero es el siguiente en la lista
+                            const nuevoHostId = idsRestantes[0];
+                            salas[sala].hostId = nuevoHostId;
+                            
+                            // Le avisamos al nuevo rey
+                            io.to(nuevoHostId).emit('rol-asignado', { host: true });
+                            console.log(`👑 Nuevo Host asignado en '${sala}': ${salas[sala].jugadores[nuevoHostId].nickname}`);
+                        }
+                    }
+
+                    // 4. Actualizamos a los sobrevivientes
+                    const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
+                    io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
+                    io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+                }
             }
         }
-    }, 10000); // 10 segundos de gracia
+    }, 20000); // 10 segundos de gracia
   });
-});
 
 // ==================== INICIO SERVIDOR ====================
 http.listen(PORT, () => {
