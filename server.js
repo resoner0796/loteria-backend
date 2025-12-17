@@ -18,7 +18,8 @@ const http = require('http').createServer(app);
 const io = require('socket.io')(http, {
   cors: { origin: '*' }
 });
-
+// Agrega esto arriba con los otros require
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 // --- NUEVAS LIBRERÍAS DE SEGURIDAD ---
 const bcrypt = require('bcryptjs'); 
 const cors = require('cors');
@@ -141,6 +142,83 @@ async function actualizarSaldoUsuario(jugador) {
         console.error("❌ Error al guardar saldo:", error);
     }
 }
+
+// ==================== PAGOS STRIPE ====================
+
+// 1. RUTA PARA CREAR LA ORDEN DE PAGO
+app.post('/api/crear-orden', async (req, res) => {
+    const { cantidad, precio, email } = req.body;
+    
+    // URL de tu backend (Render te da esta variable automática, o pon tu link manual)
+    // OJO: Cambia esto por TU URL REAL de Render si falla (ej: https://loteria-backend.onrender.com)
+    const dominio = process.env.RENDER_EXTERNAL_URL || "http://localhost:3000"; 
+
+    try {
+        const session = await stripe.checkout.sessions.create({
+            payment_method_types: ['card'],
+            line_items: [
+                {
+                    price_data: {
+                        currency: 'mxn',
+                        product_data: {
+                            name: `Paquete de ${cantidad} Monedas`,
+                            description: 'Monedas virtuales para Lotería WebApp',
+                        },
+                        unit_amount: precio * 100, // Stripe usa centavos ($29.00 -> 2900)
+                    },
+                    quantity: 1,
+                },
+            ],
+            mode: 'payment',
+            // Aquí guardamos el email y monedas en los metadatos para saber a quién dárselas luego
+            metadata: {
+                email_usuario: email,
+                monedas_a_dar: cantidad
+            },
+            // A dónde redirigir si paga o cancela
+            success_url: `${dominio}/api/confirmar-pago?session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: `https://resoner0796.github.io/CARTAS-LOTERIA-/index.html?pago=cancelado`, // TU URL DEL FRONTEND
+        });
+
+        res.json({ url: session.url });
+    } catch (error) {
+        console.error("Error Stripe:", error);
+        res.status(500).json({ error: "No se pudo crear la orden" });
+    }
+});
+
+// 2. RUTA SECRETA QUE RECIBE EL ÉXITO Y DA LAS MONEDAS
+app.get('/api/confirmar-pago', async (req, res) => {
+    const { session_id } = req.query;
+
+    try {
+        const session = await stripe.checkout.sessions.retrieve(session_id);
+        
+        if (session.payment_status === 'paid') {
+            const email = session.metadata.email_usuario;
+            const monedasExtra = parseInt(session.metadata.monedas_a_dar);
+            
+            console.log(`💰 Pago exitoso! Acreditando ${monedasExtra} a ${email}`);
+
+            // Buscamos al usuario en Firebase y le sumamos
+            const userRef = db.collection('usuarios').doc(email);
+            const doc = await userRef.get();
+            
+            if (doc.exists) {
+                const actuales = doc.data().monedas || 0;
+                await userRef.update({ monedas: actuales + monedasExtra });
+            }
+
+            // Redirigimos al usuario de vuelta al juego con mensaje de éxito
+            res.redirect(`https://resoner0796.github.io/CARTAS-LOTERIA-/index.html?pago=exito&cantidad=${monedasExtra}`);
+        } else {
+            res.send("El pago no fue completado.");
+        }
+    } catch (error) {
+        console.error("Error confirmando pago:", error);
+        res.redirect(`https://resoner0796.github.io/CARTAS-LOTERIA-/index.html?pago=error`);
+    }
+});
 
 // ==================== SOCKET.IO ====================
 io.on('connection', (socket) => {
