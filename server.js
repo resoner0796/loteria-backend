@@ -463,7 +463,7 @@ io.on('connection', (socket) => {
         }
     }, 20000); // 10 segundos de gracia
   });
-
+});
 // ==================== INICIO SERVIDOR ====================
 http.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
