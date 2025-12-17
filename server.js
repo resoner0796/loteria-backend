@@ -248,6 +248,21 @@ io.on('connection', (socket) => {
     }
   });
 
+
+  socket.on('deseleccionar-carta', ({ carta, sala }) => {
+    const salaInfo = salas[sala];
+    if (salaInfo && salaInfo.jugadores[socket.id]) {
+      const jugador = salaInfo.jugadores[socket.id];
+      
+      // Filtramos la carta para quitarla de la lista del jugador
+      jugador.cartas = jugador.cartas.filter(c => c !== carta);
+      
+      // Actualizamos a todos para que sepan que esa carta ya está libre
+      const cartasOcupadas = Object.values(salaInfo.jugadores).flatMap(j => j.cartas);
+      io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
+    }
+  });
+
   socket.on('apostar', async ({ sala, cantidad }) => {
     if (salas[sala] && salas[sala].jugadores[socket.id] && !salas[sala].jugadores[socket.id].apostado) {
       const jugador = salas[sala].jugadores[socket.id];
