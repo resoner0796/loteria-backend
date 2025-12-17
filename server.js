@@ -1,6 +1,9 @@
+// server.js
+
 // ==================== CONFIG FIREBASE ====================
 const admin = require('firebase-admin');
-const serviceAccount = JSON.parse(process.env.nicknames);
+// Asegúrate de que tu variable de entorno 'nicknames' tenga el JSON correcto
+const serviceAccount = JSON.parse(process.env.nicknames); 
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -16,16 +19,90 @@ const io = require('socket.io')(http, {
   cors: { origin: '*' }
 });
 
+// --- NUEVAS LIBRERÍAS DE SEGURIDAD ---
+const bcrypt = require('bcryptjs'); 
+const cors = require('cors');
+
+app.use(cors());
+app.use(express.json()); // Necesario para leer el Login/Registro
+
 const PORT = process.env.PORT || 3000;
 
 // Estado del juego por sala
 const salas = {};
 
+// ==================== RUTAS DE API (LOGIN Y REGISTRO) ====================
+
 app.get('/', (req, res) => {
-  res.send('Servidor de Lotería funcionando con Firebase ✅');
+  res.send('Servidor de Lotería "Pro" funcionando ✅');
+});
+
+// 1. REGISTRO
+app.post('/api/registro', async (req, res) => {
+    const { email, password, nickname } = req.body;
+    
+    try {
+        const userRef = db.collection('usuarios').doc(email);
+        const doc = await userRef.get();
+
+        if (doc.exists) {
+            return res.status(400).json({ error: 'El correo ya está registrado.' });
+        }
+
+        // Encriptamos la contraseña
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        // Guardamos en Firebase (Colección 'usuarios')
+        await userRef.set({
+            email,
+            password: hashedPassword,
+            nickname,
+            monedas: 50, // Bono de bienvenida
+            creado: new Date()
+        });
+
+        res.json({ success: true, nickname, monedas: 50, email });
+    } catch (error) {
+        console.error("Error registro:", error);
+        res.status(500).json({ error: 'Error en el servidor.' });
+    }
+});
+
+// 2. LOGIN
+app.post('/api/login', async (req, res) => {
+    const { email, password } = req.body;
+
+    try {
+        const userRef = db.collection('usuarios').doc(email);
+        const doc = await userRef.get();
+
+        if (!doc.exists) {
+            return res.status(400).json({ error: 'Usuario no encontrado.' });
+        }
+
+        const userData = doc.data();
+
+        // Verificamos contraseña
+        const validPassword = await bcrypt.compare(password, userData.password);
+        if (!validPassword) {
+            return res.status(400).json({ error: 'Contraseña incorrecta.' });
+        }
+
+        res.json({ 
+            success: true, 
+            nickname: userData.nickname, 
+            monedas: userData.monedas, 
+            email: userData.email 
+        });
+
+    } catch (error) {
+        console.error("Error login:", error);
+        res.status(500).json({ error: 'Error en el servidor.' });
+    }
 });
 
 // ==================== FUNCIONES AUXILIARES ====================
+
 function mezclarBaraja() {
   const cartas = Array.from({ length: 54 }, (_, i) => String(i + 1).padStart(2, '0'));
   return cartas.sort(() => Math.random() - 0.5);
@@ -46,25 +123,68 @@ function repartirCartas(sala) {
     const carta = salaInfo.baraja.shift();
     salaInfo.historial.push(carta);
     io.to(sala).emit('carta-cantada', carta);
-  }, 6000);
+  }, 4000); // Ajustado a 4 segundos por carta para buen ritmo
 }
 
-// Guardar datos de jugador en Firestore
-async function guardarJugador(nickname, datosJugador) {
-  try {
-    const jugadorRef = db.collection('jugadores').doc(nickname);
-    await jugadorRef.set(datosJugador, { merge: true });
-    console.log(`✅ Datos del jugador ${nickname} guardados en Firebase.`);
-  } catch (error) {
-    console.error("❌ Error al guardar jugador:", error);
-  }
+// Función auxiliar para actualizar monedas (soporta email o nickname legacy)
+async function actualizarSaldoUsuario(jugador) {
+    try {
+        if (jugador.email) {
+            // Si tiene email (usuario registrado), actualizamos en 'usuarios'
+            await db.collection('usuarios').doc(jugador.email).update({ monedas: jugador.monedas });
+            console.log(`✅ Saldo actualizado para ${jugador.email}`);
+        } else {
+            // Fallback para usuarios viejos (solo nickname)
+            await db.collection('jugadores').doc(jugador.nickname).set({ monedas: jugador.monedas }, { merge: true });
+        }
+    } catch (error) {
+        console.error("❌ Error al guardar saldo:", error);
+    }
 }
 
 // ==================== SOCKET.IO ====================
 io.on('connection', (socket) => {
-  console.log('Nuevo jugador conectado:', socket.id);
+  console.log('Nuevo socket conectado:', socket.id);
 
-  socket.on('unirse-sala', async ({ nickname, sala }) => {
+  // --- LÓGICA DE RECONEXIÓN (NUEVO) ---
+  socket.on('reconectar', ({ sala, email }) => {
+      if (sala && salas[sala]) {
+          // Buscamos si el jugador ya estaba en la sala por su email
+          const jugadorExistente = Object.values(salas[sala].jugadores).find(j => j.email === email);
+          
+          if (jugadorExistente) {
+              socket.join(sala);
+              
+              // Actualizamos el ID del socket viejo por el nuevo
+              const viejoSocketId = jugadorExistente.id;
+              
+              // Actualizamos la referencia
+              salas[sala].jugadores[socket.id] = jugadorExistente;
+              salas[sala].jugadores[socket.id].id = socket.id; 
+              
+              // Borramos la referencia vieja
+              if (viejoSocketId !== socket.id) {
+                  delete salas[sala].jugadores[viejoSocketId];
+              }
+              
+              console.log(`♻️ Jugador ${jugadorExistente.nickname} RECONECTADO.`);
+              
+              // Le enviamos su estado actual para que no empiece de cero
+              socket.emit('estado-sala-restaurado', { 
+                  enJuego: salas[sala].juegoIniciado,
+                  cartas: jugadorExistente.cartas,
+                  apostado: jugadorExistente.apostado,
+                  monedas: jugadorExistente.monedas
+              });
+              
+              // Actualizamos lista a todos por si acaso
+              io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+          }
+      }
+  });
+
+  // --- UNIRSE A SALA (MODIFICADO PARA EMAIL) ---
+  socket.on('unirse-sala', async ({ nickname, email, sala }) => { // Agregamos email
     socket.join(sala);
 
     if (!salas[sala]) {
@@ -79,37 +199,35 @@ io.on('connection', (socket) => {
         loteriaPendiente: null,
         pagoRealizado: false
       };
-      console.log(`Sala '${sala}' creada por ${nickname} (${socket.id})`);
       socket.emit('rol-asignado', { host: true });
+      console.log(`Sala '${sala}' creada por ${nickname}`);
     } else {
       socket.emit('rol-asignado', { host: false });
     }
 
-    // 🔹 Revisar si el jugador ya existe en Firebase
+    // Buscamos monedas actuales (prioridad DB)
     let monedasIniciales = 30;
     try {
-      const jugadorDoc = await db.collection('jugadores').doc(nickname).get();
-      if (jugadorDoc.exists) {
-        monedasIniciales = jugadorDoc.data().monedas || 30;
-      } else {
-        await db.collection('jugadores').doc(nickname).set({
-          nickname,
-          monedas: monedasIniciales
-        });
-      }
-    } catch (error) {
-      console.error("❌ Error al cargar jugador de Firebase:", error);
-    }
+        if(email) {
+            const userDoc = await db.collection('usuarios').doc(email).get();
+            if (userDoc.exists) monedasIniciales = userDoc.data().monedas;
+        } else {
+             // Legacy check
+             const jugadorDoc = await db.collection('jugadores').doc(nickname).get();
+             if (jugadorDoc.exists) monedasIniciales = jugadorDoc.data().monedas;
+        }
+    } catch (error) { console.error("Error cargando monedas DB", error); }
 
     salas[sala].jugadores[socket.id] = { 
       nickname, 
+      email, // Guardamos email para identificar
       monedas: monedasIniciales, 
       apostado: false, 
       cartas: [], 
       id: socket.id 
     };
 
-    console.log(`${nickname} se ha unido a la sala '${sala}'`);
+    console.log(`${nickname} entró a '${sala}'`);
     
     const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
     io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
@@ -130,9 +248,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // En server.js - Modifica la sección de 'apostar'
-
-socket.on('apostar', async ({ sala, cantidad }) => {
+  socket.on('apostar', async ({ sala, cantidad }) => {
     if (salas[sala] && salas[sala].jugadores[socket.id] && !salas[sala].jugadores[socket.id].apostado) {
       const jugador = salas[sala].jugadores[socket.id];
       if (jugador.monedas >= cantidad) {
@@ -140,58 +256,50 @@ socket.on('apostar', async ({ sala, cantidad }) => {
         salas[sala].bote += cantidad;
         jugador.apostado = true;
 
-        // ESTA LÍNEA ES LA CLAVE DE LA SOLUCIÓN:
-        // Usamos 'jugadores-actualizados' para que cada quien busque su propio saldo en la lista.
+        // FIX: Solo enviamos la lista completa, NO el evento individual 'monedas-actualizado'
         io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
-        
-        // --- BORRA O COMENTA ESTA LÍNEA QUE CAUSA EL BUG ---
-        // io.to(sala).emit('monedas-actualizado', jugador.monedas); 
-        // ---------------------------------------------------
-
         io.to(sala).emit('bote-actualizado', salas[sala].bote);
 
-        // Guardar cambios en Firebase
-        await guardarJugador(jugador.nickname, { monedas: jugador.monedas });
+        // Guardar cambios en Firebase (Usando la nueva función que soporta email)
+        await actualizarSaldoUsuario(jugador);
       } else {
         socket.emit('error-apuesta', 'No tienes suficientes monedas.');
       }
     }
   });
 
-  // En server.js
+  socket.on('iniciar-juego', (sala) => {
+    if (salas[sala] && socket.id === salas[sala].hostId) {
+      if (!salas[sala].juegoIniciado) {
+        // 1. Preparamos el juego
+        salas[sala].baraja = mezclarBaraja();
+        salas[sala].historial = [];
+        salas[sala].juegoIniciado = true;
+        salas[sala].loteriaPendiente = null;
+        salas[sala].pagoRealizado = false;
+        
+        // 2. Avisamos inicio + CAMPANA
+        io.to(sala).emit('juego-iniciado');
+        io.to(sala).emit('campana'); 
 
-socket.on('iniciar-juego', (sala) => {
-  if (salas[sala] && socket.id === salas[sala].hostId) {
-    if (!salas[sala].juegoIniciado) {
-      // 1. Preparamos el juego
-      salas[sala].baraja = mezclarBaraja();
-      salas[sala].historial = [];
-      salas[sala].juegoIniciado = true;
-      salas[sala].loteriaPendiente = null;
-      salas[sala].pagoRealizado = false;
-      
-      // 2. Avisamos que inicia (opcional) y tocamos CAMPANA
-      io.to(sala).emit('juego-iniciado');
-      io.to(sala).emit('campana'); // <--- ¡IMPORTANTE!
+        console.log(`Sala ${sala}: Iniciando secuencia...`);
 
-      console.log(`Sala ${sala}: Iniciando secuencia de arranque...`);
+        // 3. Esperamos 2s y mandamos CORRE
+        setTimeout(() => {
+            if(salas[sala] && salas[sala].juegoIniciado) {
+               io.to(sala).emit('corre');
+            }
+        }, 2000);
 
-      // 3. Esperamos 2 segundos y mandamos "CORRE Y SE VA"
-      setTimeout(() => {
-          if(salas[sala] && salas[sala].juegoIniciado) {
-             io.to(sala).emit('corre'); // <--- ¡IMPORTANTE!
-          }
-      }, 2000);
-
-      // 4. Esperamos otros 3 segundos (lo que dura el audio de "corre") y empezamos a dar cartas
-      setTimeout(() => {
-          if(salas[sala] && salas[sala].juegoIniciado) {
-             repartirCartas(sala); // <--- Aquí ya arrancan las cartas
-          }
-      }, 5000); 
+        // 4. Esperamos 3s más y arrancan las cartas
+        setTimeout(() => {
+            if(salas[sala] && salas[sala].juegoIniciado) {
+               repartirCartas(sala);
+            }
+        }, 5000); 
+      }
     }
-  }
-});
+  });
 
   socket.on('detener-juego', (sala) => {
     if (salas[sala] && socket.id === salas[sala].hostId) {
@@ -246,50 +354,44 @@ socket.on('iniciar-juego', (sala) => {
   
   socket.on('confirmar-ganador', async ({ sala, ganadorId, esValido }) => {
     const salaInfo = salas[sala];
-  
+    
     if (!salaInfo || socket.id !== salaInfo.hostId || !salaInfo.loteriaPendiente || salaInfo.pagoRealizado || ganadorId !== salaInfo.loteriaPendiente.ganadorId) {
-      console.warn(`[SALA: ${sala}] Intento de confirmación inválido.`);
       return;
     }
-  
+    
     const jugadorGanador = salaInfo.jugadores[ganadorId];
-    if (!jugadorGanador) {
-      console.error(`[SALA: ${sala}] Error: El jugador con ID ${ganadorId} no fue encontrado.`);
-      return;
-    }
-  
+    if (!jugadorGanador) return;
+    
     if (esValido === false) {
-      console.log(`[SALA: ${sala}] El Host RECHAZÓ la victoria de ${jugadorGanador.nickname}.`);
       io.to(sala).emit('ganador-rechazado', ganadorId);
       salaInfo.loteriaPendiente = null;
       salaInfo.juegoIniciado = true;
       repartirCartas(sala); 
       return; 
     }
-  
+    
     const boteActual = Number(salaInfo.bote) || 0;
-    console.log(`[SALA: ${sala}] El Host ACEPTÓ la victoria de ${jugadorGanador.nickname}.`);
-  
+    
     if (boteActual > 0) {
       jugadorGanador.monedas += boteActual;
       salaInfo.bote = 0;
       salaInfo.pagoRealizado = true;
 
-      // 🔹 Guardar cambios en Firebase
-      await guardarJugador(jugadorGanador.nickname, { monedas: jugadorGanador.monedas });
+      // Guardar cambios en Firebase (función nueva)
+      await actualizarSaldoUsuario(jugadorGanador);
     }
-  
+    
     for (const id in salaInfo.jugadores) {
       salaInfo.jugadores[id].apostado = false;
     }
-  
+    
     salaInfo.loteriaPendiente = null;
     salaInfo.juegoIniciado = false;
     if (salaInfo.intervaloCartas) {
       clearInterval(salaInfo.intervaloCartas);
       salaInfo.intervaloCartas = null;
     }
-  
+    
     io.to(sala).emit('ganador-confirmado', ganadorId);
     io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores);
     io.to(sala).emit('bote-actualizado', salaInfo.bote);
@@ -300,37 +402,38 @@ socket.on('iniciar-juego', (sala) => {
       const nickname = salas[sala].jugadores[socket.id].nickname;
       socket.leave(sala);
       delete salas[sala].jugadores[socket.id];
-      console.log(`${nickname} ha dejado la sala '${sala}'`);
+      
       const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
       io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
       io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+      
       if (Object.keys(salas[sala].jugadores).length === 0) {
         if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
         delete salas[sala];
-        console.log(`Sala '${sala}' eliminada.`);
       }
     }
   });
 
   socket.on('disconnect', () => {
-    console.log('Jugador desconectado:', socket.id);
-    for (const sala in salas) {
-      if (salas[sala].jugadores[socket.id]) {
-        const nickname = salas[sala].jugadores[socket.id].nickname;
-        delete salas[sala].jugadores[socket.id];
-        console.log(`${nickname} ha dejado la sala '${sala}'`);
-        
-        const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
-        io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
-        io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
-
-        if (Object.keys(salas[sala].jugadores).length === 0) {
-          if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
-          delete salas[sala];
-          console.log(`Sala '${sala}' eliminada.`);
+    // PROTECCIÓN DE DESCONEXIÓN:
+    // No borramos al jugador inmediatamente para darle chance de volver.
+    // Solo lo sacamos si pasa mucho tiempo o si la sala se vacía.
+    console.log('Jugador desconectado (esperando posible reconexión):', socket.id);
+    
+    // Dejamos un timeout de limpieza por si acaso nunca vuelve
+    setTimeout(() => {
+        // En un sistema más complejo verificaríamos si ya se reconectó con otro socket.
+        // Por ahora, dejamos que la lógica de limpieza de salas lo maneje si todos se van.
+        for (const sala in salas) {
+            if (salas[sala].jugadores[socket.id]) {
+                // Si sigue aquí con el MISMO id viejo, es que no volvió. Borramos.
+                // Pero si ya se reconectó, este socket.id ya no existe en la sala (fue reemplazado).
+                const nick = salas[sala].jugadores[socket.id].nickname;
+                delete salas[sala].jugadores[socket.id];
+                io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+            }
         }
-      }
-    }
+    }, 10000); // 10 segundos de gracia
   });
 });
 
