@@ -1,15 +1,28 @@
 {
-  "name": "mi-servidor-loteria",
+  "name": "loteria-backend",
   "version": "1.0.0",
-  "description": "Servidor para juego de lotería",
+  "description": "Servidor multijugador para Lotería",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "firebase-admin": "^11.11.0",
     "socket.io": "^4.7.2"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/resoner0796/CARTAS-LOTERIA-.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/resoner0796/CARTAS-LOTERIA-/issues"
+  },
+  "homepage": "https://github.com/resoner0796/CARTAS-LOTERIA-#readme"
 }
