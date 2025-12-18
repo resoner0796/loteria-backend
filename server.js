@@ -151,12 +151,14 @@ async function actualizarSaldoUsuario(jugador) {
 app.post('/api/crear-orden', async (req, res) => {
     const { cantidad, precio, email } = req.body;
     
-    // URL base para cuando termine el pago (Stripe SIEMPRE redirige al final por seguridad)
-    const dominio = process.env.RENDER_EXTERNAL_URL || "https://resoner0796.github.io/CARTAS-LOTERIA-"; 
+    // --- CORRECCIÓN IMPORTANTE ---
+    // Ponemos la URL FIJA de tu juego (GitHub Pages).
+    // Quitamos "process.env..." para que NO intente regresar al servidor de Render.
+    const dominio = "https://resoner0796.github.io/CARTAS-LOTERIA-"; 
 
     try {
         const session = await stripe.checkout.sessions.create({
-            ui_mode: 'embedded', // <--- ESTA ES LA CLAVE MÁGICA
+            ui_mode: 'embedded', // Modo embebido (dentro del modal)
             payment_method_types: ['card'],
             line_items: [
                 {
@@ -165,7 +167,8 @@ app.post('/api/crear-orden', async (req, res) => {
                         product_data: {
                             name: `Paquete de ${cantidad} Monedas`,
                         },
-                        unit_amount: Math.round(precio * 100),
+                        // Math.round para asegurar centavos exactos ($29.99 -> 2999)
+                        unit_amount: Math.round(precio * 100), 
                     },
                     quantity: 1,
                 },
@@ -175,11 +178,11 @@ app.post('/api/crear-orden', async (req, res) => {
                 email_usuario: email,
                 monedas_a_dar: cantidad
             },
-            // return_url: A donde va DESPUÉS de que el pago se procesó exitosamente
+            // return_url: Ahora sí apunta al Frontend correcto
             return_url: `${dominio}/index.html?pago=exito&cantidad=${cantidad}&session_id={CHECKOUT_SESSION_ID}`,
         });
 
-        // En lugar de URL, devolvemos el secreto
+        // Devolvemos el secreto para que el Frontend pinte el formulario
         res.json({ clientSecret: session.client_secret });
     } catch (error) {
         console.error("Error Stripe:", error);
