@@ -394,20 +394,27 @@ io.on('connection', (socket) => {
 
   // En server.js
 
-socket.on('apostar', async (sala) => {
+// server.js - CORRECCIÓN EN EL EVENTO APOSTAR
+
+socket.on('apostar', async (data) => {
+    // 1. CORRECCIÓN: Detectamos si 'data' es un objeto (lo que manda app.js) o solo texto
+    const sala = (typeof data === 'object') ? data.sala : data;
+
     if (salas[sala] && !salas[sala].juegoIniciado) {
         const jugador = salas[sala].jugadores[socket.id];
-        const COSTO_APUESTA = 10; // O la variable que uses para el costo
+        const COSTO_APUESTA = 10; // Costo fijo por partida
 
+        // Verificamos que tenga dinero suficiente
         if (jugador && !jugador.apostado && jugador.monedas >= COSTO_APUESTA) {
-            // 1. Restamos monedas y marcamos apuesta
+            
+            // 2. Restamos monedas y marcamos apuesta
             jugador.monedas -= COSTO_APUESTA;
             jugador.apostado = true;
-            jugador.cantidadApostada = COSTO_APUESTA; // <--- GUARDAMOS ESTO PARA REEMBOLSOS
+            jugador.cantidadApostada = COSTO_APUESTA; // Guardamos para reembolso
             
             salas[sala].bote += COSTO_APUESTA;
 
-            // 2. Guardamos en BD (Cobro)
+            // 3. Guardamos en BD (Cobro)
             try {
                 if (jugador.email) {
                     await db.collection('usuarios').doc(jugador.email).update({ 
@@ -416,10 +423,10 @@ socket.on('apostar', async (sala) => {
                 }
             } catch (e) { console.error("Error cobrando apuesta:", e); }
 
-            // 3. Avisamos a la sala
+            // 4. Avisamos a la sala
             io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
             io.to(sala).emit('bote-actualizado', salas[sala].bote);
-            io.to(sala).emit('sonido-apuesta'); // Si tienes sonido
+            io.to(sala).emit('sonido-apuesta'); 
         }
     }
 });
