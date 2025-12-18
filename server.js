@@ -227,6 +227,39 @@ app.get('/api/confirmar-pago', async (req, res) => {
     }
 });
 
+// Función auxiliar para devolver dinero si se salen antes de jugar
+async function procesarReembolsoPorSalida(salaId, socketId) {
+    const sala = salas[salaId];
+    if (!sala) return;
+
+    const jugador = sala.jugadores[socketId];
+    if (!jugador) return;
+
+    // CONDICIÓN DE ORO: Si el juego NO ha iniciado Y el jugador apostó
+    if (!sala.juegoIniciado && jugador.apostado) {
+        const reembolso = jugador.cantidadApostada || 10; // Recuperamos lo que pagó
+        
+        // 1. Devolvemos el dinero al objeto jugador
+        jugador.monedas += reembolso;
+        
+        // 2. Restamos del bote de la mesa
+        sala.bote -= reembolso;
+        if(sala.bote < 0) sala.bote = 0;
+
+        console.log(`🛡️ REEMBOLSO: Regresando ${reembolso} monedas a ${jugador.nickname} (Salió antes de inicio)`);
+
+        // 3. Actualizamos la Base de Datos (IMPORTANTE para que no se pierda)
+        try {
+            if (jugador.email) {
+                await db.collection('usuarios').doc(jugador.email).update({ 
+                    monedas: jugador.monedas 
+                });
+            }
+        } catch (e) { console.error("Error guardando reembolso:", e); }
+    }
+}
+
+
 // ==================== SOCKET.IO ====================
 io.on('connection', (socket) => {
   console.log('Nuevo socket conectado:', socket.id);
@@ -359,25 +392,37 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('apostar', async ({ sala, cantidad }) => {
-    if (salas[sala] && salas[sala].jugadores[socket.id] && !salas[sala].jugadores[socket.id].apostado) {
-      const jugador = salas[sala].jugadores[socket.id];
-      if (jugador.monedas >= cantidad) {
-        jugador.monedas -= cantidad;
-        salas[sala].bote += cantidad;
-        jugador.apostado = true;
+  // En server.js
 
-        // FIX: Solo enviamos la lista completa, NO el evento individual 'monedas-actualizado'
-        io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
-        io.to(sala).emit('bote-actualizado', salas[sala].bote);
+socket.on('apostar', async (sala) => {
+    if (salas[sala] && !salas[sala].juegoIniciado) {
+        const jugador = salas[sala].jugadores[socket.id];
+        const COSTO_APUESTA = 10; // O la variable que uses para el costo
 
-        // Guardar cambios en Firebase (Usando la nueva función que soporta email)
-        await actualizarSaldoUsuario(jugador);
-      } else {
-        socket.emit('error-apuesta', 'No tienes suficientes monedas.');
-      }
+        if (jugador && !jugador.apostado && jugador.monedas >= COSTO_APUESTA) {
+            // 1. Restamos monedas y marcamos apuesta
+            jugador.monedas -= COSTO_APUESTA;
+            jugador.apostado = true;
+            jugador.cantidadApostada = COSTO_APUESTA; // <--- GUARDAMOS ESTO PARA REEMBOLSOS
+            
+            salas[sala].bote += COSTO_APUESTA;
+
+            // 2. Guardamos en BD (Cobro)
+            try {
+                if (jugador.email) {
+                    await db.collection('usuarios').doc(jugador.email).update({ 
+                        monedas: jugador.monedas 
+                    });
+                }
+            } catch (e) { console.error("Error cobrando apuesta:", e); }
+
+            // 3. Avisamos a la sala
+            io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+            io.to(sala).emit('bote-actualizado', salas[sala].bote);
+            io.to(sala).emit('sonido-apuesta'); // Si tienes sonido
+        }
     }
-  });
+});
 
   socket.on('iniciar-juego', (data) => {
     // 1. Detectamos si viene objeto (con velocidad) o solo texto (para compatibilidad)
@@ -515,72 +560,106 @@ io.on('connection', (socket) => {
     io.to(sala).emit('bote-actualizado', salaInfo.bote);
   });
 
-  socket.on('salir-sala', (sala) => {
-    if (salas[sala] && salas[sala].jugadores[socket.id]) {
-      const nickname = salas[sala].jugadores[socket.id].nickname;
-      socket.leave(sala);
-      delete salas[sala].jugadores[socket.id];
-      
-      const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
-      io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
-      io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
-      
-      if (Object.keys(salas[sala].jugadores).length === 0) {
-        if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
-        delete salas[sala];
-      }
-    }
-  });
+  // ==================== SALIR Y DESCONEXIÓN (CON REEMBOLSO) ====================
 
-  socket.on('disconnect', () => {
+socket.on('salir-sala', async (sala) => {
+    if (salas[sala] && salas[sala].jugadores[socket.id]) {
+        
+        // --- 1. PROTECCIÓN DE APUESTA (NUEVO) ---
+        // Si apostó y el juego no ha iniciado, le regresamos su dinero antes de borrarlo
+        await procesarReembolsoPorSalida(sala, socket.id);
+        // ----------------------------------------
+
+        const nickname = salas[sala].jugadores[socket.id].nickname;
+        const eraHost = (salas[sala].hostId === socket.id); // Guardamos si era Host
+
+        socket.leave(sala);
+        delete salas[sala].jugadores[socket.id];
+        
+        // 2. Si la sala se queda vacía, la matamos
+        if (Object.keys(salas[sala].jugadores).length === 0) {
+            if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+            delete salas[sala];
+            console.log(`🗑️ Sala '${sala}' eliminada (último jugador salió).`);
+        } else {
+            // 3. MIGRACIÓN DE HOST (Si el que salió era el jefe)
+            if (eraHost) {
+                const idsRestantes = Object.keys(salas[sala].jugadores);
+                if (idsRestantes.length > 0) {
+                    const nuevoHostId = idsRestantes[0];
+                    salas[sala].hostId = nuevoHostId;
+                    
+                    // Actualizamos la propiedad 'host' del objeto jugador para que salga la corona
+                    salas[sala].jugadores[nuevoHostId].host = true;
+
+                    io.to(nuevoHostId).emit('rol-asignado', { host: true });
+                    console.log(`👑 Nuevo Host asignado en '${sala}': ${salas[sala].jugadores[nuevoHostId].nickname}`);
+                }
+            }
+
+            // 4. Actualizamos a los que quedan
+            const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
+            io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
+            io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+            io.to(sala).emit('bote-actualizado', salas[sala].bote); // Actualizamos bote por si bajó por reembolso
+        }
+    }
+});
+
+socket.on('disconnect', () => {
     // PROTECCIÓN DE DESCONEXIÓN:
     console.log('Jugador desconectado (esperando posible reconexión):', socket.id);
     
     // Dejamos un timeout de 10 segundos antes de declararlo "muerto"
-    setTimeout(() => {
+    setTimeout(async () => {
         for (const sala in salas) {
             // Buscamos si el ID VIEJO sigue en la sala.
-            // Si el jugador se reconectó, la función 'reconectar' ya habría cambiado su ID 
-            // y borrado este ID viejo, por lo que este IF daría falso y no pasaría nada (éxito).
             if (salas[sala].jugadores[socket.id]) {
                 
                 // === SI ENTRAMOS AQUÍ, ES QUE NO VOLVIÓ ===
-                const jugadorSaliente = salas[sala].jugadores[socket.id];
-                const eraHost = (salas[sala].hostId === socket.id); // ¿Era el Host?
+                
+                // --- 1. PROTECCIÓN DE APUESTA (NUEVO) ---
+                // Antes de borrarlo, checamos si hay que devolver lana
+                await procesarReembolsoPorSalida(sala, socket.id);
+                // ----------------------------------------
 
-                // 1. Lo borramos definitivamente
+                const jugadorSaliente = salas[sala].jugadores[socket.id];
+                const eraHost = (salas[sala].hostId === socket.id); 
+
+                // 2. Lo borramos definitivamente
                 delete salas[sala].jugadores[socket.id];
                 console.log(`❌ ${jugadorSaliente.nickname} eliminado de ${sala} tras timeout.`);
 
-                // 2. Verificamos si la sala quedó vacía
+                // 3. Verificamos si la sala quedó vacía
                 if (Object.keys(salas[sala].jugadores).length === 0) {
                     if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
                     delete salas[sala];
                     console.log(`🗑️ Sala '${sala}' eliminada por inactividad.`);
                 } else {
-                    // 3. LA SALA SIGUE VIVA: MIGRACIÓN DE HOST
+                    // 4. LA SALA SIGUE VIVA: MIGRACIÓN DE HOST
                     if (eraHost) {
                         const idsRestantes = Object.keys(salas[sala].jugadores);
                         if (idsRestantes.length > 0) {
-                            // El heredero es el siguiente en la lista
                             const nuevoHostId = idsRestantes[0];
                             salas[sala].hostId = nuevoHostId;
                             
-                            // Le avisamos al nuevo rey
+                            // Actualizamos propiedad host
+                            salas[sala].jugadores[nuevoHostId].host = true;
+
                             io.to(nuevoHostId).emit('rol-asignado', { host: true });
                             console.log(`👑 Nuevo Host asignado en '${sala}': ${salas[sala].jugadores[nuevoHostId].nickname}`);
                         }
                     }
 
-                    // 4. Actualizamos a los sobrevivientes
+                    // 5. Actualizamos a los sobrevivientes
                     const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
                     io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
                     io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+                    io.to(sala).emit('bote-actualizado', salas[sala].bote); // Actualizar bote
                 }
             }
         }
-    }, 20000); // 10 segundos de gracia
-  });
+    }, 20000); // 20 segundos de gracia (según tu código original)
 });
 // ==================== INICIO SERVIDOR ====================
 http.listen(PORT, () => {
