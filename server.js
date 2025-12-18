@@ -269,9 +269,10 @@ io.on('connection', (socket) => {
   });
 
   // --- UNIRSE A SALA (MODIFICADO PARA EMAIL) ---
-  socket.on('unirse-sala', async ({ nickname, email, sala }) => { // Agregamos email
+  socket.on('unirse-sala', async ({ nickname, email, sala }) => { 
     socket.join(sala);
 
+    // 1. Si la sala no existe, la creamos y asignamos al Host
     if (!salas[sala]) {
       salas[sala] = {
         jugadores: {},
@@ -279,47 +280,57 @@ io.on('connection', (socket) => {
         historial: [],
         juegoIniciado: false,
         bote: 0,
-        hostId: socket.id,
+        hostId: socket.id, // El primer jugador es el Host
         intervaloCartas: null,
         loteriaPendiente: null,
-        pagoRealizado: false
+        pagoRealizado: false,
+        velocidad: 3000 // Iniciamos con velocidad normal por defecto
       };
+      // Avisamos al creador que es Host
       socket.emit('rol-asignado', { host: true });
       console.log(`Sala '${sala}' creada por ${nickname}`);
     } else {
-      socket.emit('rol-asignado', { host: false });
+      // Si la sala ya existe, checamos si este socket es el Host (por si acaso)
+      // Normalmente será false para los que se unen después
+      const esHost = (socket.id === salas[sala].hostId);
+      socket.emit('rol-asignado', { host: esHost });
     }
 
-    // Buscamos monedas actuales (prioridad DB)
+    // 2. Buscamos monedas actuales (prioridad DB)
     let monedasIniciales = 30;
     try {
         if(email) {
             const userDoc = await db.collection('usuarios').doc(email).get();
             if (userDoc.exists) monedasIniciales = userDoc.data().monedas;
         } else {
-             // Legacy check
+             // Legacy check (para usuarios viejos sin email)
              const jugadorDoc = await db.collection('jugadores').doc(nickname).get();
              if (jugadorDoc.exists) monedasIniciales = jugadorDoc.data().monedas;
         }
     } catch (error) { console.error("Error cargando monedas DB", error); }
 
+    // 3. Guardamos al jugador en la sala (AQUÍ VA LA CORONA)
     salas[sala].jugadores[socket.id] = { 
       nickname, 
-      email, // Guardamos email para identificar
+      email, 
       monedas: monedasIniciales, 
       apostado: false, 
       cartas: [], 
-      id: socket.id 
+      id: socket.id,
+      // --- CAMBIO CLAVE: Marcamos si es el Host ---
+      // Esto permite que el Frontend sepa a quién ponerle la corona 👑
+      host: (socket.id === salas[sala].hostId) 
     };
 
     console.log(`${nickname} entró a '${sala}'`);
     
+    // 4. Actualizamos a todos en la sala
     const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
     io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
     io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
     io.to(sala).emit('bote-actualizado', salas[sala].bote);
     io.to(sala).emit('historial-actualizado', salas[sala].historial);
-  });
+});
 
   socket.on('seleccionar-carta', ({ carta, sala }) => {
     const salaInfo = salas[sala];
