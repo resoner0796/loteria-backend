@@ -143,22 +143,19 @@ async function actualizarSaldoUsuario(jugador) {
     }
 }
 
-// ==================== PAGOS STRIPE ====================
+// ==================== PAGOS STRIPE CORREGIDO (FINAL) ====================
+
+// DEFINIMOS LAS URLs EXACTAS PARA NO FALLAR
+const FRONTEND_URL = "https://resoner0796.github.io/CARTAS-LOTERIA-";
+const BACKEND_URL = "https://loteria-backend-3nde.onrender.com";
 
 // 1. RUTA PARA CREAR LA ORDEN DE PAGO
-// server.js - ACTUALIZA ESTA RUTA
-
 app.post('/api/crear-orden', async (req, res) => {
     const { cantidad, precio, email } = req.body;
     
-    // --- CORRECCIÓN IMPORTANTE ---
-    // Ponemos la URL FIJA de tu juego (GitHub Pages).
-    // Quitamos "process.env..." para que NO intente regresar al servidor de Render.
-    const dominio = "https://resoner0796.github.io/CARTAS-LOTERIA-"; 
-
     try {
         const session = await stripe.checkout.sessions.create({
-            ui_mode: 'embedded', // Modo embebido (dentro del modal)
+            ui_mode: 'embedded',
             payment_method_types: ['card'],
             line_items: [
                 {
@@ -167,7 +164,7 @@ app.post('/api/crear-orden', async (req, res) => {
                         product_data: {
                             name: `Paquete de ${cantidad} Monedas`,
                         },
-                        // Math.round para asegurar centavos exactos ($29.99 -> 2999)
+                        // Math.round asegura que 29.99 se convierta en 2999 centavos exactos
                         unit_amount: Math.round(precio * 100), 
                     },
                     quantity: 1,
@@ -178,11 +175,11 @@ app.post('/api/crear-orden', async (req, res) => {
                 email_usuario: email,
                 monedas_a_dar: cantidad
             },
-            // return_url: Ahora sí apunta al Frontend correcto
-            return_url: `${dominio}/index.html?pago=exito&cantidad=${cantidad}&session_id={CHECKOUT_SESSION_ID}`,
+            // --- CAMBIO CRÍTICO ---
+            // Stripe debe regresar al BACKEND primero para procesar la recarga en la BD
+            return_url: `${BACKEND_URL}/api/confirmar-pago?session_id={CHECKOUT_SESSION_ID}`,
         });
 
-        // Devolvemos el secreto para que el Frontend pinte el formulario
         res.json({ clientSecret: session.client_secret });
     } catch (error) {
         console.error("Error Stripe:", error);
@@ -190,7 +187,7 @@ app.post('/api/crear-orden', async (req, res) => {
     }
 });
 
-// 2. RUTA SECRETA QUE RECIBE EL ÉXITO Y DA LAS MONEDAS
+// 2. RUTA QUE GUARDA LAS MONEDAS Y LUEGO TE MANDA AL JUEGO
 app.get('/api/confirmar-pago', async (req, res) => {
     const { session_id } = req.query;
 
@@ -201,9 +198,9 @@ app.get('/api/confirmar-pago', async (req, res) => {
             const email = session.metadata.email_usuario;
             const monedasExtra = parseInt(session.metadata.monedas_a_dar);
             
-            console.log(`💰 Pago exitoso! Acreditando ${monedasExtra} a ${email}`);
+            console.log(`💰 Pago confirmado. Acreditando ${monedasExtra} a ${email}`);
 
-            // Buscamos al usuario en Firebase y le sumamos
+            // 1. Guardamos en Firebase (Base de datos real)
             const userRef = db.collection('usuarios').doc(email);
             const doc = await userRef.get();
             
@@ -212,14 +209,15 @@ app.get('/api/confirmar-pago', async (req, res) => {
                 await userRef.update({ monedas: actuales + monedasExtra });
             }
 
-            // Redirigimos al usuario de vuelta al juego con mensaje de éxito
-            res.redirect(`https://resoner0796.github.io/CARTAS-LOTERIA-/index.html?pago=exito&cantidad=${monedasExtra}`);
+            // 2. Redirigimos al usuario al JUEGO (Frontend) con el aviso de éxito
+            res.redirect(`${FRONTEND_URL}/index.html?pago=exito&cantidad=${monedasExtra}`);
         } else {
-            res.send("El pago no fue completado.");
+            // Si falló el pago, lo mandamos al juego con aviso de cancelación
+            res.redirect(`${FRONTEND_URL}/index.html?pago=cancelado`);
         }
     } catch (error) {
         console.error("Error confirmando pago:", error);
-        res.redirect(`https://resoner0796.github.io/CARTAS-LOTERIA-/index.html?pago=error`);
+        res.redirect(`${FRONTEND_URL}/index.html?pago=error`);
     }
 });
 
