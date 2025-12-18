@@ -249,6 +249,14 @@ io.on('connection', (socket) => {
               socket.join(sala);
               const viejoSocketId = jugadorExistente.id;
               
+              // --- FIX: ACTUALIZAR HOST ID SI EL QUE REGRESA ES EL PATRÓN ---
+              // Si no hacíamos esto, el servidor le hablaba al socket muerto
+              if (salas[sala].hostId === viejoSocketId) {
+                  salas[sala].hostId = socket.id;
+                  console.log(`👑 Host ID actualizado tras reconexión: ${socket.id}`);
+              }
+              // -------------------------------------------------------------
+
               salas[sala].jugadores[socket.id] = jugadorExistente;
               salas[sala].jugadores[socket.id].id = socket.id; 
               
@@ -264,6 +272,9 @@ io.on('connection', (socket) => {
                   apostado: jugadorExistente.apostado,
                   monedas: jugadorExistente.monedas
               });
+              
+              // Re-enviar rol por si acaso
+              socket.emit('rol-asignado', { host: (socket.id === salas[sala].hostId) });
               
               io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
           }
@@ -489,6 +500,7 @@ io.on('connection', (socket) => {
         // Timer para cerrar la ventana de reclamos
         salaInfo.timerEmpate = setTimeout(() => {
             const hostId = salaInfo.hostId;
+            // IMPORTANTE: Enviamos al ID actual del host (que puede haber cambiado si reconectó)
             io.to(hostId).emit('iniciar-validacion-secuencial', salaInfo.reclamantes);
         }, 4000);
 
