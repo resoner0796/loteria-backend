@@ -660,6 +660,7 @@ socket.on('disconnect', () => {
             }
         }
     }, 20000); // 20 segundos de gracia (según tu código original)
+  });
 });
 // ==================== INICIO SERVIDOR ====================
 http.listen(PORT, () => {
