@@ -396,23 +396,30 @@ io.on('connection', (socket) => {
 
 // server.js - CORRECCIÓN EN EL EVENTO APOSTAR
 
+// server.js - CORRECCIÓN APOSTAR (Dinámico: $1 por carta)
+
 socket.on('apostar', async (data) => {
-    // 1. CORRECCIÓN: Detectamos si 'data' es un objeto (lo que manda app.js) o solo texto
+    // 1. Extraemos sala y cantidad del objeto que manda el cliente
     const sala = (typeof data === 'object') ? data.sala : data;
+    // Si no viene cantidad, asumimos 1 por seguridad
+    const cantidadCartas = (typeof data === 'object' && data.cantidad) ? parseInt(data.cantidad) : 1;
 
     if (salas[sala] && !salas[sala].juegoIniciado) {
         const jugador = salas[sala].jugadores[socket.id];
-        const COSTO_APUESTA = 1; // Costo fijo por partida
+        
+        // --- AQUÍ ESTÁ EL AJUSTE ---
+        const COSTO_POR_CARTA = 1; 
+        const costoTotal = cantidadCartas * COSTO_POR_CARTA;
 
-        // Verificamos que tenga dinero suficiente
-        if (jugador && !jugador.apostado && jugador.monedas >= COSTO_APUESTA) {
+        // Verificamos que tenga dinero suficiente para SUS cartas
+        if (jugador && !jugador.apostado && jugador.monedas >= costoTotal) {
             
             // 2. Restamos monedas y marcamos apuesta
-            jugador.monedas -= COSTO_APUESTA;
+            jugador.monedas -= costoTotal;
             jugador.apostado = true;
-            jugador.cantidadApostada = COSTO_APUESTA; // Guardamos para reembolso
+            jugador.cantidadApostada = costoTotal; // Guardamos esto para el reembolso si se sale
             
-            salas[sala].bote += COSTO_APUESTA;
+            salas[sala].bote += costoTotal;
 
             // 3. Guardamos en BD (Cobro)
             try {
