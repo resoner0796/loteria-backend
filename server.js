@@ -115,6 +115,12 @@ function repartirCartas(sala) {
 
   if (salaInfo.intervaloCartas) clearInterval(salaInfo.intervaloCartas);
 
+  // --- CORRECCIÓN: Leemos la velocidad elegida por el Host ---
+  // Si no existe (por error), usamos 3000ms (3 segundos) por defecto
+  const velocidad = salaInfo.velocidad || 3000;
+
+  console.log(`Sala ${sala}: Repartiendo cartas a velocidad ${velocidad}ms`);
+
   salaInfo.intervaloCartas = setInterval(() => {
     if (!salaInfo.juegoIniciado || salaInfo.baraja.length === 0) {
       clearInterval(salaInfo.intervaloCartas);
@@ -124,7 +130,7 @@ function repartirCartas(sala) {
     const carta = salaInfo.baraja.shift();
     salaInfo.historial.push(carta);
     io.to(sala).emit('carta-cantada', carta);
-  }, 4000); // Ajustado a 4 segundos por carta para buen ritmo
+  }, velocidad); // <--- AQUÍ APLICAMOS LA VELOCIDAD DINÁMICA
 }
 
 // Función auxiliar para actualizar monedas (soporta email o nickname legacy)
