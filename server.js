@@ -165,7 +165,7 @@ app.post('/api/crear-orden', async (req, res) => {
                         product_data: {
                             name: `Paquete de ${cantidad} Monedas`,
                         },
-                        unit_amount: precio * 100,
+                        unit_amount: Math.round(precio * 100),
                     },
                     quantity: 1,
                 },
