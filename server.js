@@ -402,7 +402,7 @@ socket.on('apostar', async (data) => {
 
     if (salas[sala] && !salas[sala].juegoIniciado) {
         const jugador = salas[sala].jugadores[socket.id];
-        const COSTO_APUESTA = 10; // Costo fijo por partida
+        const COSTO_APUESTA = 1; // Costo fijo por partida
 
         // Verificamos que tenga dinero suficiente
         if (jugador && !jugador.apostado && jugador.monedas >= COSTO_APUESTA) {
@@ -672,4 +672,66 @@ socket.on('disconnect', () => {
 // ==================== INICIO SERVIDOR ====================
 http.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+});
+
+// ==================== PANEL ADMINISTRATIVO ====================
+
+// PON AQUÍ TU CORREO EXACTO (El que usarás para administrar)
+const ADMIN_EMAIL = "admin@loteria.com"; 
+
+// 1. OBTENER TODOS LOS USUARIOS
+app.get('/api/admin/usuarios', async (req, res) => {
+    // Validación básica de seguridad (puedes mejorarla luego con tokens)
+    const solicitante = req.headers['admin-email'];
+    if (solicitante !== ADMIN_EMAIL) {
+        return res.status(403).json({ error: "No tienes permisos de Dios." });
+    }
+
+    try {
+        const snapshot = await db.collection('usuarios').get();
+        const usuarios = [];
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            // Solo mandamos info pública y necesaria, NO contraseñas
+            usuarios.push({
+                email: data.email,
+                nickname: data.nickname,
+                monedas: data.monedas
+            });
+        });
+        res.json(usuarios);
+    } catch (error) {
+        console.error("Error admin usuarios:", error);
+        res.status(500).json({ error: "Error obteniendo datos" });
+    }
+});
+
+// 2. RECARGA MANUAL (MODO DIOS)
+app.post('/api/admin/recargar-manual', async (req, res) => {
+    const { adminEmail, targetEmail, cantidad } = req.body;
+
+    if (adminEmail !== ADMIN_EMAIL) {
+        return res.status(403).json({ error: "Acceso denegado." });
+    }
+
+    try {
+        const userRef = db.collection('usuarios').doc(targetEmail);
+        const doc = await userRef.get();
+
+        if (!doc.exists) {
+            return res.status(404).json({ error: "Usuario no encontrado." });
+        }
+
+        const monedasActuales = doc.data().monedas || 0;
+        const nuevasMonedas = monedasActuales + parseInt(cantidad);
+
+        await userRef.update({ monedas: nuevasMonedas });
+
+        console.log(`⚡ ADMIN: Recarga manual de ${cantidad} a ${targetEmail}`);
+        res.json({ success: true, nuevoSaldo: nuevasMonedas });
+
+    } catch (error) {
+        console.error("Error recarga manual:", error);
+        res.status(500).json({ error: "No se pudo realizar la recarga." });
+    }
 });
