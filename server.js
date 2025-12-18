@@ -146,15 +146,17 @@ async function actualizarSaldoUsuario(jugador) {
 // ==================== PAGOS STRIPE ====================
 
 // 1. RUTA PARA CREAR LA ORDEN DE PAGO
+// server.js - ACTUALIZA ESTA RUTA
+
 app.post('/api/crear-orden', async (req, res) => {
     const { cantidad, precio, email } = req.body;
     
-    // URL de tu backend (Render te da esta variable automática, o pon tu link manual)
-    // OJO: Cambia esto por TU URL REAL de Render si falla (ej: https://loteria-backend.onrender.com)
-    const dominio = process.env.RENDER_EXTERNAL_URL || "http://localhost:3000"; 
+    // URL base para cuando termine el pago (Stripe SIEMPRE redirige al final por seguridad)
+    const dominio = process.env.RENDER_EXTERNAL_URL || "https://resoner0796.github.io/CARTAS-LOTERIA-"; 
 
     try {
         const session = await stripe.checkout.sessions.create({
+            ui_mode: 'embedded', // <--- ESTA ES LA CLAVE MÁGICA
             payment_method_types: ['card'],
             line_items: [
                 {
@@ -162,25 +164,23 @@ app.post('/api/crear-orden', async (req, res) => {
                         currency: 'mxn',
                         product_data: {
                             name: `Paquete de ${cantidad} Monedas`,
-                            description: 'Monedas virtuales para Lotería WebApp',
                         },
-                        unit_amount: precio * 100, // Stripe usa centavos ($29.00 -> 2900)
+                        unit_amount: precio * 100,
                     },
                     quantity: 1,
                 },
             ],
             mode: 'payment',
-            // Aquí guardamos el email y monedas en los metadatos para saber a quién dárselas luego
             metadata: {
                 email_usuario: email,
                 monedas_a_dar: cantidad
             },
-            // A dónde redirigir si paga o cancela
-            success_url: `${dominio}/api/confirmar-pago?session_id={CHECKOUT_SESSION_ID}`,
-            cancel_url: `https://resoner0796.github.io/CARTAS-LOTERIA-/index.html?pago=cancelado`, // TU URL DEL FRONTEND
+            // return_url: A donde va DESPUÉS de que el pago se procesó exitosamente
+            return_url: `${dominio}/index.html?pago=exito&cantidad=${cantidad}&session_id={CHECKOUT_SESSION_ID}`,
         });
 
-        res.json({ url: session.url });
+        // En lugar de URL, devolvemos el secreto
+        res.json({ clientSecret: session.client_secret });
     } catch (error) {
         console.error("Error Stripe:", error);
         res.status(500).json({ error: "No se pudo crear la orden" });
