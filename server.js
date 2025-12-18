@@ -362,30 +362,37 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('iniciar-juego', (sala) => {
+  socket.on('iniciar-juego', (data) => {
+    // 1. Detectamos si viene objeto (con velocidad) o solo texto (para compatibilidad)
+    const sala = (typeof data === 'object') ? data.sala : data;
+    const velocidad = (typeof data === 'object' && data.velocidad) ? parseInt(data.velocidad) : 3000;
+
     if (salas[sala] && socket.id === salas[sala].hostId) {
       if (!salas[sala].juegoIniciado) {
-        // 1. Preparamos el juego
+        // 2. Preparamos el juego
         salas[sala].baraja = mezclarBaraja();
         salas[sala].historial = [];
         salas[sala].juegoIniciado = true;
         salas[sala].loteriaPendiente = null;
         salas[sala].pagoRealizado = false;
         
-        // 2. Avisamos inicio + CAMPANA
+        // --- NUEVO: Guardamos la velocidad en la sala ---
+        salas[sala].velocidad = velocidad; 
+        
+        // 3. Avisamos inicio + CAMPANA
         io.to(sala).emit('juego-iniciado');
         io.to(sala).emit('campana'); 
 
-        console.log(`Sala ${sala}: Iniciando secuencia...`);
+        console.log(`Sala ${sala}: Iniciando secuencia... (Velocidad: ${velocidad}ms)`);
 
-        // 3. Esperamos 2s y mandamos CORRE
+        // 4. Esperamos 2s y mandamos CORRE
         setTimeout(() => {
             if(salas[sala] && salas[sala].juegoIniciado) {
                io.to(sala).emit('corre');
             }
         }, 2000);
 
-        // 4. Esperamos 3s más y arrancan las cartas
+        // 5. Esperamos 3s más y arrancan las cartas
         setTimeout(() => {
             if(salas[sala] && salas[sala].juegoIniciado) {
                repartirCartas(sala);
@@ -393,7 +400,7 @@ io.on('connection', (socket) => {
         }, 5000); 
       }
     }
-  });
+});
 
   socket.on('detener-juego', (sala) => {
     if (salas[sala] && socket.id === salas[sala].hostId) {
