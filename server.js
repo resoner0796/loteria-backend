@@ -451,6 +451,7 @@ io.on('connection', (socket) => {
             io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
             io.to(sala).emit('bote-actualizado', salas[sala].bote);
             io.to(sala).emit('sonido-apuesta'); 
+            io.to(sala).emit("reproducir-sonido-apuesta");
         }
     }
   });
