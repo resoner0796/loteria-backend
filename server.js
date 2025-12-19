@@ -130,6 +130,46 @@ app.get('/api/buscar-destinatario', async (req, res) => {
     }
 });
 
+// REALIZAR TRANSFERENCIA ENTRE USUARIOS
+app.post('/api/transferir-saldo', async (req, res) => {
+    const { origenEmail, destinoEmail, cantidad } = req.body;
+    const monto = parseInt(cantidad);
+
+    if (!origenEmail || !destinoEmail || monto <= 0) {
+        return res.json({ success: false, error: "Datos inválidos" });
+    }
+
+    try {
+        await db.runTransaction(async (t) => {
+            const origenRef = db.collection('usuarios').doc(origenEmail);
+            const destinoRef = db.collection('usuarios').doc(destinoEmail);
+
+            const docOrigen = await t.get(origenRef);
+            const docDestino = await t.get(destinoRef);
+
+            if (!docOrigen.exists || !docDestino.exists) {
+                throw "Uno de los usuarios no existe";
+            }
+
+            const saldoOrigen = docOrigen.data().monedas || 0;
+
+            if (saldoOrigen < monto) {
+                throw "Saldo insuficiente";
+            }
+
+            // Ejecutar el movimiento
+            t.update(origenRef, { monedas: admin.firestore.FieldValue.increment(-monto) });
+            t.update(destinoRef, { monedas: admin.firestore.FieldValue.increment(monto) });
+        });
+
+        res.json({ success: true });
+
+    } catch (e) {
+        console.error("Error transferencia:", e);
+        res.json({ success: false, error: e.toString() });
+    }
+});
+
 // ==================== FUNCIONES AUXILIARES ====================
 
 function mezclarBaraja() {
