@@ -706,3 +706,33 @@ app.post('/api/admin/recargar-manual', async (req, res) => {
 http.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
+
+// COMPRA EN TIENDA
+    socket.on('comprar-item', async ({ email, itemId, precio }) => {
+        try {
+            const userRef = db.collection('usuarios').doc(email);
+            const doc = await userRef.get();
+
+            if (doc.exists) {
+                const data = doc.data();
+                const monedasActuales = data.monedas || 0;
+                let inventario = data.inventario || [];
+
+                // Validación servidor: ¿Tiene saldo y NO tiene el item aún?
+                if (monedasActuales >= precio && !inventario.includes(itemId)) {
+                    await userRef.update({
+                        monedas: admin.firestore.FieldValue.increment(-precio),
+                        inventario: admin.firestore.FieldValue.arrayUnion(itemId)
+                    });
+                    console.log(`Usuario ${email} compró ${itemId} por ${precio}`);
+                    
+                    // Emitir evento de vuelta para asegurar sincronización
+                    // (Opcional si confías en la UI optimista, pero recomendado)
+                    const userActualizado = await userRef.get();
+                    io.to(socket.id).emit('usuario-actualizado', userActualizado.data());
+                }
+            }
+        } catch (e) {
+            console.error("Error en compra:", e);
+        }
+    });
