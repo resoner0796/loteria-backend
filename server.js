@@ -288,7 +288,12 @@ io.on('connection', (socket) => {
           }
       }
   });
-
+// EFECTOS DE SONIDO EN JUEGO
+    socket.on("enviar-efecto-sonido", ({ sala, soundId, emisor }) => {
+        // Reenviar a TODOS en la sala (incluyendo al que lo envió para que confirme que salió)
+        io.to(sala).emit("reproducir-efecto-sonido", { soundId, emisor });
+    });
+  
   // --- UNIRSE A SALA (ACTUALIZADO: MODOS Y EMPATES) ---
   socket.on('unirse-sala', async ({ nickname, email, sala, modo }) => { 
     socket.join(sala);
