@@ -97,6 +97,39 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
+// BUSCAR USUARIO POR NICKNAME (Para transferencias)
+app.get('/api/buscar-destinatario', async (req, res) => {
+    const { nickname } = req.query;
+
+    if (!nickname) return res.json({ success: false, error: "Falta nickname" });
+
+    try {
+        // Buscamos en toda la colección de usuarios quién tiene ese nickname
+        const snapshot = await db.collection('usuarios')
+            .where('nickname', '==', nickname)
+            .limit(1)
+            .get();
+
+        if (snapshot.empty) {
+            return res.json({ success: false, error: "Usuario no encontrado" });
+        }
+
+        // Si lo encuentra, devolvemos su email (que es el ID real)
+        const doc = snapshot.docs[0];
+        return res.json({ 
+            success: true, 
+            destinatario: { 
+                email: doc.id, // IMPORTANTE: Necesitamos el email para transferirle
+                nickname: doc.data().nickname 
+            } 
+        });
+
+    } catch (error) {
+        console.error("Error buscando usuario:", error);
+        res.status(500).json({ success: false, error: "Error en servidor" });
+    }
+});
+
 // ==================== FUNCIONES AUXILIARES ====================
 
 function mezclarBaraja() {
