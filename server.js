@@ -141,10 +141,14 @@ async function actualizarSaldoUsuario(jugador) {
 
 // ==================== PAGOS STRIPE ====================
 
-const FRONTEND_URL = "https://resoner0796.github.io/CARTAS-LOTERIA-";
+// 1. CAMBIO IMPORTANTE: Pon aquí tu nueva URL de Vercel (sin el /index.html al final)
+const FRONTEND_URL = "https://loteria-online-red.vercel.app"; 
+
+// Esta se queda igual (es tu server en Render)
 const BACKEND_URL = "https://loteria-backend-3nde.onrender.com";
 
 app.post('/api/crear-orden', async (req, res) => {
+    // ... todo este bloque se queda IGUAL ...
     const { cantidad, precio, email } = req.body;
     
     try {
@@ -168,6 +172,7 @@ app.post('/api/crear-orden', async (req, res) => {
                 email_usuario: email,
                 monedas_a_dar: cantidad
             },
+            // ESTO SE QUEDA IGUAL (Redirige primero al backend para procesar)
             return_url: `${BACKEND_URL}/api/confirmar-pago?session_id={CHECKOUT_SESSION_ID}`,
         });
 
@@ -179,6 +184,7 @@ app.post('/api/crear-orden', async (req, res) => {
 });
 
 app.get('/api/confirmar-pago', async (req, res) => {
+    // ... este bloque también se queda igual, solo la redirección final cambiará sola ...
     const { session_id } = req.query;
 
     try {
@@ -198,6 +204,8 @@ app.get('/api/confirmar-pago', async (req, res) => {
                 await userRef.update({ monedas: actuales + monedasExtra });
             }
 
+            // AQUÍ ES DONDE OCURRE LA MAGIA:
+            // Como ya actualizamos FRONTEND_URL arriba, ahora los mandará a Vercel
             res.redirect(`${FRONTEND_URL}/index.html?pago=exito&cantidad=${monedasExtra}`);
         } else {
             res.redirect(`${FRONTEND_URL}/index.html?pago=cancelado`);
