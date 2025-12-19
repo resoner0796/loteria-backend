@@ -288,6 +288,52 @@ io.on('connection', (socket) => {
           }
       }
   });
+  
+  // --- AGREGAR ESTO PARA CUANDO RECARGAN LA PÁGINA (F5) ---
+    socket.on('solicitar-info-usuario', async (email) => {
+        try {
+            const doc = await db.collection('usuarios').doc(email).get();
+            if (doc.exists) {
+                // Le mandamos al cliente sus datos frescos de la DB
+                socket.emit('usuario-actualizado', doc.data());
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    });
+
+    // --- ACTUALIZAR EL EVENTO DE COMPRA (PARA QUE CONFIRME Y SINCRONICE) ---
+    socket.on('comprar-item', async ({ email, itemId, precio }) => {
+        try {
+            const userRef = db.collection('usuarios').doc(email);
+            
+            // Usamos transacción para que no haya errores de saldo negativo
+            await db.runTransaction(async (t) => {
+                const doc = await t.get(userRef);
+                if (!doc.exists) return;
+
+                const data = doc.data();
+                const monedas = data.monedas || 0;
+                const inventario = data.inventario || [];
+
+                if (monedas >= precio && !inventario.includes(itemId)) {
+                    // Cobramos y entregamos
+                    t.update(userRef, {
+                        monedas: monedas - precio,
+                        inventario: admin.firestore.FieldValue.arrayUnion(itemId)
+                    });
+                }
+            });
+
+            // DESPUÉS DE LA TRANSACCIÓN: LEER Y ENVIAR ESTADO FINAL REAL
+            const docFinal = await userRef.get();
+            io.to(socket.id).emit('usuario-actualizado', docFinal.data());
+
+        } catch (e) {
+            console.error("Error comprando:", e);
+        }
+    });
+  
 // EFECTOS DE SONIDO EN JUEGO
     socket.on("enviar-efecto-sonido", ({ sala, soundId, emisor }) => {
         // Reenviar a TODOS en la sala (incluyendo al que lo envió para que confirme que salió)
