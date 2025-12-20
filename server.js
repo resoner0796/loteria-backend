@@ -881,6 +881,57 @@ app.post('/api/admin/recargar-manual', async (req, res) => {
     }
 });
 
+
+// ==================== API DEL HUB (JUEGOS EN LA NUBE) ====================
+
+// 1. OBTENER TODOS LOS JUEGOS (Público)
+app.get('/api/hub/juegos', async (req, res) => {
+    try {
+        const snapshot = await db.collection('juegos_hub').get();
+        const juegos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        res.json({ success: true, juegos });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Error al cargar juegos" });
+    }
+});
+
+// 2. AGREGAR NUEVO JUEGO (Solo Admin)
+app.post('/api/hub/nuevo-juego', async (req, res) => {
+    const { adminEmail, titulo, url, imgPoster, descripcion, estado } = req.body;
+
+    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Sin permiso" });
+
+    try {
+        await db.collection('juegos_hub').add({
+            titulo,
+            url,
+            imgPoster, // URL de la imagen
+            descripcion,
+            estado, // 'activo' o 'proximamente'
+            creado: admin.firestore.FieldValue.serverTimestamp()
+        });
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: "Error al guardar juego" });
+    }
+});
+
+// 3. ELIMINAR JUEGO (Solo Admin)
+app.delete('/api/hub/eliminar-juego/:id', async (req, res) => {
+    const { id } = req.params;
+    const adminEmail = req.headers['admin-email'];
+
+    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Sin permiso" });
+
+    try {
+        await db.collection('juegos_hub').doc(id).delete();
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: "Error al eliminar" });
+    }
+});
+
 http.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
