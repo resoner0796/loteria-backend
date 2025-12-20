@@ -276,7 +276,7 @@ async function actualizarSaldoUsuario(jugador) {
 
 // ==================== PAGOS STRIPE ====================
 
-const FRONTEND_URL = "https://loteria-online-red.vercel.app"; 
+const FRONTEND_URL = "https://loteria.juegosenlanube.com/"; 
 const BACKEND_URL = "https://loteria-backend-3nde.onrender.com";
 
 app.post('/api/crear-orden', async (req, res) => {
