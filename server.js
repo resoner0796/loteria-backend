@@ -274,13 +274,15 @@ async function actualizarSaldoUsuario(jugador) {
     }
 }
 
-// ==================== PAGOS STRIPE ====================
+// ==================== PAGOS STRIPE (SOPORTE MULTI-DOMINIO) ====================
 
-const FRONTEND_URL = "https://loteria.juegosenlanube.com/"; 
+const FRONTEND_LOTERIA = "https://loteria-online-red.vercel.app"; 
+const FRONTEND_HUB = "https://juegosenlanube.com"; // TU NUEVO DOMINIO
 const BACKEND_URL = "https://loteria-backend-3nde.onrender.com";
 
 app.post('/api/crear-orden', async (req, res) => {
-    const { cantidad, precio, email } = req.body;
+    // Agregamos 'origen' para saber de dónde viene el pago
+    const { cantidad, precio, email, origen } = req.body;
     
     try {
         const session = await stripe.checkout.sessions.create({
@@ -290,9 +292,7 @@ app.post('/api/crear-orden', async (req, res) => {
                 {
                     price_data: {
                         currency: 'mxn',
-                        product_data: {
-                            name: `Paquete de ${cantidad} Monedas`,
-                        },
+                        product_data: { name: `Paquete de ${cantidad} Monedas` },
                         unit_amount: Math.round(precio * 100), 
                     },
                     quantity: 1,
@@ -301,7 +301,8 @@ app.post('/api/crear-orden', async (req, res) => {
             mode: 'payment',
             metadata: {
                 email_usuario: email,
-                monedas_a_dar: cantidad
+                monedas_a_dar: cantidad,
+                origen_pago: origen || 'loteria' // Guardamos quién pidió el pago
             },
             return_url: `${BACKEND_URL}/api/confirmar-pago?session_id={CHECKOUT_SESSION_ID}`,
         });
@@ -322,8 +323,9 @@ app.get('/api/confirmar-pago', async (req, res) => {
         if (session.payment_status === 'paid') {
             const email = session.metadata.email_usuario;
             const monedasExtra = parseInt(session.metadata.monedas_a_dar);
+            const origen = session.metadata.origen_pago; // Recuperamos el origen
             
-            console.log(`💰 Pago confirmado. Acreditando ${monedasExtra} a ${email}`);
+            console.log(`💰 Pago confirmado (${origen}). Acreditando ${monedasExtra} a ${email}`);
 
             const userRef = db.collection('usuarios').doc(email);
             const doc = await userRef.get();
@@ -331,18 +333,23 @@ app.get('/api/confirmar-pago', async (req, res) => {
             if (doc.exists) {
                 const actuales = doc.data().monedas || 0;
                 await userRef.update({ monedas: actuales + monedasExtra });
-                
-                // --- NUEVO: Registrar Historial ---
                 await registrarMovimiento(email, 'recarga', monedasExtra, 'Recarga con Tarjeta', true);
             }
 
-            res.redirect(`${FRONTEND_URL}/index.html?pago=exito&cantidad=${monedasExtra}`);
+            // REDIRECCIÓN INTELIGENTE
+            if (origen === 'hub') {
+                res.redirect(`${FRONTEND_HUB}/index.html?pago=exito&cantidad=${monedasExtra}`);
+            } else {
+                res.redirect(`${FRONTEND_LOTERIA}/index.html?pago=exito&cantidad=${monedasExtra}`);
+            }
+
         } else {
-            res.redirect(`${FRONTEND_URL}/index.html?pago=cancelado`);
+            // Cancelado (Redirigir al Hub por defecto o según origen también si quieres pulirlo más)
+            res.redirect(`${FRONTEND_HUB}/index.html?pago=cancelado`);
         }
     } catch (error) {
         console.error("Error confirmando pago:", error);
-        res.redirect(`${FRONTEND_URL}/index.html?pago=error`);
+        res.redirect(`${FRONTEND_HUB}/index.html?pago=error`);
     }
 });
 
