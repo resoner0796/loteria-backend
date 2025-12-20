@@ -11,6 +11,23 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+// --- HELPER PARA REGISTRAR MOVIMIENTOS EN EL HISTORIAL ---
+async function registrarMovimiento(email, tipo, monto, descripcion, esIngreso) {
+    if(!email) return; // Si no hay email, no guardamos nada
+    try {
+        await db.collection('usuarios').doc(email).collection('historial').add({
+            tipo: tipo,        // Ej: 'transferencia', 'compra', 'apuesta', 'recarga'
+            monto: parseInt(monto),
+            descripcion: descripcion,
+            esIngreso: esIngreso, // true (verde/positivo) o false (rojo/negativo)
+            fecha: admin.firestore.FieldValue.serverTimestamp()
+        });
+        console.log(`📜 Historial: ${tipo} | ${descripcion} | ${email}`);
+    } catch (e) {
+        console.error("Error guardando historial:", e);
+    }
+}
+
 // ==================== CONFIG EXPRESS + SOCKET ====================
 const express = require('express');
 const app = express();
@@ -30,7 +47,7 @@ const PORT = process.env.PORT || 3000;
 // Estado del juego por sala
 const salas = {};
 
-// ==================== RUTAS DE API (LOGIN Y REGISTRO) ====================
+// ==================== RUTAS DE API ====================
 
 app.get('/', (req, res) => {
   res.send('Servidor de Lotería "Pro" funcionando ✅');
@@ -58,7 +75,7 @@ app.post('/api/registro', async (req, res) => {
             creado: new Date()
         });
 
-        res.json({ success: true, nickname, monedas: 50, email });
+        res.json({ success: true, nickname, monedas: 20, email });
     } catch (error) {
         console.error("Error registro:", error);
         res.status(500).json({ error: 'Error en el servidor.' });
@@ -97,6 +114,34 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
+// OBTENER HISTORIAL DE MOVIMIENTOS
+app.get('/api/historial-usuario', async (req, res) => {
+    const { email } = req.query;
+    if (!email) return res.json({ success: false, error: "Falta email" });
+
+    try {
+        const snapshot = await db.collection('usuarios').doc(email)
+            .collection('historial')
+            .orderBy('fecha', 'desc') // Los más nuevos primero
+            .limit(50) // Traemos los últimos 50 para no saturar
+            .get();
+
+        const movimientos = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                ...data,
+                // Convertimos el Timestamp de Firebase a fecha legible
+                fecha: data.fecha ? data.fecha.toDate() : new Date() 
+            };
+        });
+
+        res.json({ success: true, movimientos });
+    } catch (e) {
+        console.error("Error obteniendo historial:", e);
+        res.status(500).json({ success: false, error: "Error servidor" });
+    }
+});
+
 // BUSCAR USUARIO POR NICKNAME (Para transferencias)
 app.get('/api/buscar-destinatario', async (req, res) => {
     const { nickname } = req.query;
@@ -130,7 +175,7 @@ app.get('/api/buscar-destinatario', async (req, res) => {
     }
 });
 
-// REALIZAR TRANSFERENCIA ENTRE USUARIOS
+// REALIZAR TRANSFERENCIA ENTRE USUARIOS (CON HISTORIAL)
 app.post('/api/transferir-saldo', async (req, res) => {
     const { origenEmail, destinoEmail, cantidad } = req.body;
     const monto = parseInt(cantidad);
@@ -160,7 +205,24 @@ app.post('/api/transferir-saldo', async (req, res) => {
             // Ejecutar el movimiento
             t.update(origenRef, { monedas: admin.firestore.FieldValue.increment(-monto) });
             t.update(destinoRef, { monedas: admin.firestore.FieldValue.increment(monto) });
+            
+            // --- NUEVO: Nicks para el historial ---
+            const nickDestino = docDestino.data().nickname || "Usuario";
+            const nickOrigen = docOrigen.data().nickname || "Usuario";
+
+            // Guardar Historial (Fuera de la transacción estricta o aquí mismo)
+            // Nota: En Firestore Admin, es mejor hacerlo aquí o justo después.
+            // Para simplificar, lo haremos post-transacción para no bloquear si el log falla.
         });
+
+        // REGISTRAR HISTORIAL (Después del éxito)
+        const origenRef = db.collection('usuarios').doc(origenEmail);
+        const destinoRef = db.collection('usuarios').doc(destinoEmail);
+        const docDestino = await destinoRef.get(); // Obtenemos datos frescos para el nick
+        const docOrigen = await origenRef.get();
+
+        await registrarMovimiento(origenEmail, 'transferencia', monto, `Envío a ${docDestino.data().nickname}`, false);
+        await registrarMovimiento(destinoEmail, 'transferencia', monto, `Recibido de ${docOrigen.data().nickname}`, true);
 
         res.json({ success: true });
 
@@ -214,14 +276,10 @@ async function actualizarSaldoUsuario(jugador) {
 
 // ==================== PAGOS STRIPE ====================
 
-// 1. CAMBIO IMPORTANTE: Pon aquí tu nueva URL de Vercel (sin el /index.html al final)
 const FRONTEND_URL = "https://loteria-online-red.vercel.app"; 
-
-// Esta se queda igual (es tu server en Render)
 const BACKEND_URL = "https://loteria-backend-3nde.onrender.com";
 
 app.post('/api/crear-orden', async (req, res) => {
-    // ... todo este bloque se queda IGUAL ...
     const { cantidad, precio, email } = req.body;
     
     try {
@@ -245,7 +303,6 @@ app.post('/api/crear-orden', async (req, res) => {
                 email_usuario: email,
                 monedas_a_dar: cantidad
             },
-            // ESTO SE QUEDA IGUAL (Redirige primero al backend para procesar)
             return_url: `${BACKEND_URL}/api/confirmar-pago?session_id={CHECKOUT_SESSION_ID}`,
         });
 
@@ -257,7 +314,6 @@ app.post('/api/crear-orden', async (req, res) => {
 });
 
 app.get('/api/confirmar-pago', async (req, res) => {
-    // ... este bloque también se queda igual, solo la redirección final cambiará sola ...
     const { session_id } = req.query;
 
     try {
@@ -275,10 +331,11 @@ app.get('/api/confirmar-pago', async (req, res) => {
             if (doc.exists) {
                 const actuales = doc.data().monedas || 0;
                 await userRef.update({ monedas: actuales + monedasExtra });
+                
+                // --- NUEVO: Registrar Historial ---
+                await registrarMovimiento(email, 'recarga', monedasExtra, 'Recarga con Tarjeta', true);
             }
 
-            // AQUÍ ES DONDE OCURRE LA MAGIA:
-            // Como ya actualizamos FRONTEND_URL arriba, ahora los mandará a Vercel
             res.redirect(`${FRONTEND_URL}/index.html?pago=exito&cantidad=${monedasExtra}`);
         } else {
             res.redirect(`${FRONTEND_URL}/index.html?pago=cancelado`);
@@ -312,6 +369,8 @@ async function procesarReembolsoPorSalida(salaId, socketId) {
                 await db.collection('usuarios').doc(jugador.email).update({ 
                     monedas: jugador.monedas 
                 });
+                // Historial de reembolso
+                await registrarMovimiento(jugador.email, 'reembolso', reembolso, 'Reembolso por salir', true);
             }
         } catch (e) { console.error("Error guardando reembolso:", e); }
     }
@@ -330,13 +389,10 @@ io.on('connection', (socket) => {
               socket.join(sala);
               const viejoSocketId = jugadorExistente.id;
               
-              // --- FIX: ACTUALIZAR HOST ID SI EL QUE REGRESA ES EL PATRÓN ---
-              // Si no hacíamos esto, el servidor le hablaba al socket muerto
               if (salas[sala].hostId === viejoSocketId) {
                   salas[sala].hostId = socket.id;
                   console.log(`👑 Host ID actualizado tras reconexión: ${socket.id}`);
               }
-              // -------------------------------------------------------------
 
               salas[sala].jugadores[socket.id] = jugadorExistente;
               salas[sala].jugadores[socket.id].id = socket.id; 
@@ -354,20 +410,16 @@ io.on('connection', (socket) => {
                   monedas: jugadorExistente.monedas
               });
               
-              // Re-enviar rol por si acaso
               socket.emit('rol-asignado', { host: (socket.id === salas[sala].hostId) });
-              
               io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
           }
       }
   });
-  
-  // --- AGREGAR ESTO PARA CUANDO RECARGAN LA PÁGINA (F5) ---
+   
     socket.on('solicitar-info-usuario', async (email) => {
         try {
             const doc = await db.collection('usuarios').doc(email).get();
             if (doc.exists) {
-                // Le mandamos al cliente sus datos frescos de la DB
                 socket.emit('usuario-actualizado', doc.data());
             }
         } catch (e) {
@@ -375,12 +427,11 @@ io.on('connection', (socket) => {
         }
     });
 
-    // --- ACTUALIZAR EL EVENTO DE COMPRA (PARA QUE CONFIRME Y SINCRONICE) ---
+    // --- COMPRA DE ITEMS (CON HISTORIAL) ---
     socket.on('comprar-item', async ({ email, itemId, precio }) => {
         try {
             const userRef = db.collection('usuarios').doc(email);
             
-            // Usamos transacción para que no haya errores de saldo negativo
             await db.runTransaction(async (t) => {
                 const doc = await t.get(userRef);
                 if (!doc.exists) return;
@@ -390,7 +441,6 @@ io.on('connection', (socket) => {
                 const inventario = data.inventario || [];
 
                 if (monedas >= precio && !inventario.includes(itemId)) {
-                    // Cobramos y entregamos
                     t.update(userRef, {
                         monedas: monedas - precio,
                         inventario: admin.firestore.FieldValue.arrayUnion(itemId)
@@ -398,22 +448,23 @@ io.on('connection', (socket) => {
                 }
             });
 
-            // DESPUÉS DE LA TRANSACCIÓN: LEER Y ENVIAR ESTADO FINAL REAL
+            // Registrar historial y confirmar
             const docFinal = await userRef.get();
+            await registrarMovimiento(email, 'compra', precio, `Compra: ${itemId}`, false);
+            
             io.to(socket.id).emit('usuario-actualizado', docFinal.data());
 
         } catch (e) {
             console.error("Error comprando:", e);
         }
     });
-  
-// EFECTOS DE SONIDO EN JUEGO
+   
+    // EFECTOS DE SONIDO EN JUEGO
     socket.on("enviar-efecto-sonido", ({ sala, soundId, emisor }) => {
-        // Reenviar a TODOS en la sala (incluyendo al que lo envió para que confirme que salió)
         io.to(sala).emit("reproducir-efecto-sonido", { soundId, emisor });
     });
-  
-  // --- UNIRSE A SALA (ACTUALIZADO: MODOS Y EMPATES) ---
+   
+  // --- UNIRSE A SALA ---
   socket.on('unirse-sala', async ({ nickname, email, sala, modo }) => { 
     socket.join(sala);
 
@@ -428,7 +479,6 @@ io.on('connection', (socket) => {
         intervaloCartas: null,
         pagoRealizado: false,
         velocidad: 3000,
-        // --- NUEVOS DATOS PARA MODO Y EMPATE ---
         modoJuego: modo || 'clasico', 
         reclamantes: [],        
         validandoEmpate: false, 
@@ -462,7 +512,6 @@ io.on('connection', (socket) => {
       host: (socket.id === salas[sala].hostId) 
     };
 
-    // Avisamos a todos del Modo de Juego configurado
     io.to(sala).emit('info-sala', { modo: salas[sala].modoJuego });
 
     const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
@@ -494,10 +543,12 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- APOSTAR ($1 POR CARTA) ---
+  // --- APOSTAR (ACTUALIZADO: SONIDO + HISTORIAL) ---
   socket.on('apostar', async (data) => {
+    // Manejo robusto de datos (puede venir como objeto o string antiguo)
     const sala = (typeof data === 'object') ? data.sala : data;
     const cantidadCartas = (typeof data === 'object' && data.cantidad) ? parseInt(data.cantidad) : 1;
+    const emailUsuario = (typeof data === 'object') ? data.email : null; // Necesario para el historial
 
     if (salas[sala] && !salas[sala].juegoIniciado) {
         const jugador = salas[sala].jugadores[socket.id];
@@ -518,47 +569,20 @@ io.on('connection', (socket) => {
                     await db.collection('usuarios').doc(jugador.email).update({ 
                         monedas: jugador.monedas 
                     });
+                    
+                    // --- NUEVO: Registrar Historial de Apuesta ---
+                    await registrarMovimiento(jugador.email, 'apuesta', costoTotal, `Apuesta Mesa: ${sala}`, false);
                 }
             } catch (e) { console.error("Error cobrando apuesta:", e); }
 
             io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
             io.to(sala).emit('bote-actualizado', salas[sala].bote);
-            io.to(sala).emit('sonido-apuesta'); 
+            
+            // --- NUEVO: Emitir Sonido a todos ---
             io.to(sala).emit("reproducir-sonido-apuesta");
         }
     }
   });
-
-// COMPRA EN TIENDA
-    socket.on('comprar-item', async ({ email, itemId, precio }) => {
-        try {
-            const userRef = db.collection('usuarios').doc(email);
-            const doc = await userRef.get();
-
-            if (doc.exists) {
-                const data = doc.data();
-                const monedasActuales = data.monedas || 0;
-                let inventario = data.inventario || [];
-
-                // Validación servidor: ¿Tiene saldo y NO tiene el item aún?
-                if (monedasActuales >= precio && !inventario.includes(itemId)) {
-                    await userRef.update({
-                        monedas: admin.firestore.FieldValue.increment(-precio),
-                        inventario: admin.firestore.FieldValue.arrayUnion(itemId)
-                    });
-                    console.log(`Usuario ${email} compró ${itemId} por ${precio}`);
-                    
-                    // Emitir evento de vuelta para asegurar sincronización
-                    // (Opcional si confías en la UI optimista, pero recomendado)
-                    const userActualizado = await userRef.get();
-                    io.to(socket.id).emit('usuario-actualizado', userActualizado.data());
-                }
-            }
-        } catch (e) {
-            console.error("Error en compra:", e);
-        }
-    });
-
 
   socket.on('iniciar-juego', (data) => {
     const sala = (typeof data === 'object') ? data.sala : data;
@@ -572,7 +596,6 @@ io.on('connection', (socket) => {
         salas[sala].pagoRealizado = false;
         salas[sala].velocidad = velocidad;
         
-        // --- LIMPIEZA DE EMPATES ---
         salas[sala].reclamantes = []; 
         salas[sala].validandoEmpate = false;
         if(salas[sala].timerEmpate) clearTimeout(salas[sala].timerEmpate);
@@ -620,7 +643,6 @@ io.on('connection', (socket) => {
       salas[sala].bote = 0;
       salas[sala].pagoRealizado = false;
       
-      // Reset variables empate
       salas[sala].reclamantes = [];
       salas[sala].validandoEmpate = false;
 
@@ -636,40 +658,33 @@ io.on('connection', (socket) => {
   });
 
   // =========================================================
-  // 🔥 NUEVA LÓGICA DE LOTERÍA (GESTIÓN DE EMPATES) 🔥
+  // 🔥 LÓGICA DE LOTERÍA (MODOS Y EMPATES) 🔥
   // =========================================================
 
   socket.on('loteria', ({ nickname, sala, boardState }) => {
     if (!salas[sala]) return;
     const salaInfo = salas[sala];
     
-    // Si el juego NO está iniciado Y NO estamos en periodo de validación, ignorar
     if (!salaInfo.juegoIniciado && !salaInfo.validandoEmpate) return;
 
-    // 1. PRIMER GRITO (Inicia la ventana de tiempo)
     if (!salaInfo.validandoEmpate) {
         console.log(`⚡ Primer grito de Lotería en ${sala}: ${nickname}`);
         
-        salaInfo.juegoIniciado = false; // Pausa oficial
+        salaInfo.juegoIniciado = false; 
         salaInfo.validandoEmpate = true;
         
         if (salaInfo.intervaloCartas) clearInterval(salaInfo.intervaloCartas);
 
-        // Agregamos al primer ganador
         salaInfo.reclamantes.push({ id: socket.id, nickname, boardState, status: 'pendiente' });
 
-        // Avisamos a todos (4 segundos de espera)
         io.to(sala).emit('pausa-empate', { primerGanador: nickname, tiempo: 4 });
 
-        // Timer para cerrar la ventana de reclamos
         salaInfo.timerEmpate = setTimeout(() => {
             const hostId = salaInfo.hostId;
-            // IMPORTANTE: Enviamos al ID actual del host (que puede haber cambiado si reconectó)
             io.to(hostId).emit('iniciar-validacion-secuencial', salaInfo.reclamantes);
         }, 4000);
 
     } else {
-        // 2. GRITOS ADICIONALES (Dentro de los 4 segundos)
         const yaEsta = salaInfo.reclamantes.find(r => r.id === socket.id);
         if (!yaEsta) {
             console.log(`⚡ Empate detectado en ${sala}: ${nickname}`);
@@ -679,25 +694,20 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- HOST VALIDA A UN JUGADOR (NUEVO) ---
   socket.on('veredicto-host', async ({ sala, candidatoId, esValido }) => {
       const salaInfo = salas[sala];
       if (!salaInfo || socket.id !== salaInfo.hostId) return;
 
-      // Actualizamos estado del candidato
       const candidato = salaInfo.reclamantes.find(r => r.id === candidatoId);
       if (candidato) {
           candidato.status = esValido ? 'validado' : 'rechazado';
       }
 
-      // Checamos si faltan por validar
       const pendientes = salaInfo.reclamantes.filter(r => r.status === 'pendiente');
 
       if (pendientes.length > 0) {
-          // Si faltan, el Host debe validar al siguiente
           io.to(salaInfo.hostId).emit('continuar-validacion', salaInfo.reclamantes);
       } else {
-          // --- TODOS VALIDADOS: HORA DE PAGAR ---
           const ganadoresReales = salaInfo.reclamantes.filter(r => r.status === 'validado');
 
           if (ganadoresReales.length > 0) {
@@ -711,6 +721,8 @@ io.on('connection', (socket) => {
                   if (jugador) {
                       jugador.monedas += premioPorCabeza;
                       await actualizarSaldoUsuario(jugador);
+                      // --- NUEVO: Historial de Victoria ---
+                      await registrarMovimiento(jugador.email, 'victoria', premioPorCabeza, `Premio Lotería!`, true);
                   }
               }
 
@@ -731,7 +743,6 @@ io.on('connection', (socket) => {
               io.to(sala).emit('bote-actualizado', 0);
 
           } else {
-              // Todos rechazados
               salaInfo.validandoEmpate = false;
               salaInfo.reclamantes = [];
               salaInfo.juegoIniciado = true; 
@@ -851,6 +862,10 @@ app.post('/api/admin/recargar-manual', async (req, res) => {
 
         await userRef.update({ monedas: nuevasMonedas });
         console.log(`⚡ ADMIN: Recarga de ${cantidad} a ${targetEmail}`);
+        
+        // Historial de admin
+        await registrarMovimiento(targetEmail, 'recarga', cantidad, 'Recarga Admin', true);
+
         res.json({ success: true, nuevoSaldo: nuevasMonedas });
 
     } catch (error) {
@@ -862,4 +877,3 @@ app.post('/api/admin/recargar-manual', async (req, res) => {
 http.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
-
