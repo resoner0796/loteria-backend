@@ -795,9 +795,11 @@ io.on('connection', (socket) => {
   });
   
 // =========================================================
-  // 🐍 BLOQUE SERPIENTES + TIENDA (BACKEND) 🐍
+  // 🐍 BLOQUE SERPIENTES + TIENDA (FINAL) 🐍
   // =========================================================
 
+  // Variables Globales (asegúrate de tenerlas arriba o aquí)
+  // const salasSerpientes = {}; 
   const SNAKES = { 18:6, 25:9, 33:19, 41:24, 48:32, 53:13 };
   const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
 
@@ -813,34 +815,32 @@ io.on('connection', (socket) => {
               const monedas = data.monedas || 0;
               const inventario = data.inventario || [];
 
-              // Validaciones
               if (monedas < precio) return;
               if (inventario.includes(itemId)) return;
 
-              // Cobrar y Entregar
               t.update(userRef, {
                   monedas: monedas - precio,
                   inventario: admin.firestore.FieldValue.arrayUnion(itemId)
               });
           });
 
-          // Enviar actualización
           const docFinal = await userRef.get();
           socket.emit('usuario-actualizado', docFinal.data());
-          // Log historial
           await registrarMovimiento(email, 'compra', precio, `Skin: ${itemId}`, false);
-
-      } catch (e) {
-          console.error("Error compra skin:", e);
-      }
+      } catch (e) { console.error("Error compra skin:", e); }
   });
 
   // --- ENTRADA AL JUEGO ---
   socket.on('entrar-serpientes', async ({ email, nickname, apuesta, vsCpu, skin }) => {
+      // 1. ANTI-GHOST: Si ya estás en una sala, no hacer nada
+      for (const sId in salasSerpientes) {
+          if (salasSerpientes[sId].jugadores.some(j => j.id === socket.id)) return;
+      }
+
       const monto = parseInt(apuesta);
-      
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
+      
       if (!doc.exists || doc.data().monedas < monto) {
           socket.emit('error-apuesta', 'Saldo insuficiente');
           return;
@@ -857,13 +857,8 @@ io.on('connection', (socket) => {
       if (vsCpu) {
           salaId = `cpu_${socket.id}_${Date.now()}`;
           salasSerpientes[salaId] = {
-              id: salaId,
-              apuesta: monto,
-              jugadores: [],
-              turnoIndex: 0,
-              enJuego: false,
-              bote: monto * 2, 
-              esVsCpu: true 
+              id: salaId, apuesta: monto, jugadores: [], turnoIndex: 0,
+              enJuego: false, bote: monto * 2, esVsCpu: true 
           };
       } else {
           salaId = Object.keys(salasSerpientes).find(id => 
@@ -876,13 +871,8 @@ io.on('connection', (socket) => {
           if (!salaId) {
               salaId = `mesa_${monto}_${Date.now().toString().slice(-4)}`;
               salasSerpientes[salaId] = {
-                  id: salaId,
-                  apuesta: monto,
-                  jugadores: [],
-                  turnoIndex: 0,
-                  enJuego: false,
-                  bote: 0,
-                  esVsCpu: false
+                  id: salaId, apuesta: monto, jugadores: [], turnoIndex: 0,
+                  enJuego: false, bote: 0, esVsCpu: false
               };
           }
       }
@@ -890,26 +880,18 @@ io.on('connection', (socket) => {
       const sala = salasSerpientes[salaId];
       socket.join(salaId);
 
-      // Guardamos la SKIN del jugador en el objeto
-      sala.jugadores.push({ 
-          id: socket.id, 
-          email, 
-          nickname, 
-          posicion: 1, 
-          esBot: false,
-          skin: skin || '🔵' // Guardar skin
-      });
-      
-      if (!sala.esVsCpu) sala.bote += monto; 
+      // Doble check local
+      if (!sala.jugadores.some(j => j.id === socket.id)) {
+          sala.jugadores.push({ 
+              id: socket.id, email, nickname, posicion: 1, esBot: false, skin: skin || '🔵' 
+          });
+          if (!sala.esVsCpu) sala.bote += monto; 
+      }
 
-      if (sala.esVsCpu) {
+      if (sala.esVsCpu && !sala.jugadores.some(j => j.esBot)) {
           sala.jugadores.push({
-              id: 'cpu_bot',
-              email: 'banca@juegosenlanube.com',
-              nickname: '🤖 La Banca',
-              posicion: 1,
-              esBot: true,
-              skin: '🤖'
+              id: 'cpu_bot', email: 'banca@juegosenlanube.com', nickname: '🤖 La Banca',
+              posicion: 1, esBot: true, skin: '🤖'
           });
       }
 
@@ -919,67 +901,78 @@ io.on('connection', (socket) => {
       const listosParaIniciar = sala.esVsCpu || (sala.jugadores.length >= 2);
 
       if (listosParaIniciar && !sala.enJuego) {
-          if (!sala.timerInicio) {
-              const tiempoEspera = sala.esVsCpu ? 1000 : 4000;
-              if(!sala.esVsCpu) io.to(salaId).emit('notificacion', 'Iniciando partida...');
-              
-              sala.timerInicio = setTimeout(() => {
+          if (sala.timerInicio) clearTimeout(sala.timerInicio); // Reiniciar timer si entra alguien más rápido
+
+          const tiempoEspera = sala.esVsCpu ? 1500 : 4000;
+          if(!sala.esVsCpu) io.to(salaId).emit('notificacion', 'Jugador encontrado. Iniciando...');
+          
+          sala.timerInicio = setTimeout(() => {
+              // Verificación final de integridad
+              if(salasSerpientes[salaId] && salasSerpientes[salaId].jugadores.length >= 2) {
                   sala.enJuego = true;
                   sala.timerInicio = null;
-                  
-                  // ENVIAR LISTA COMPLETA (incluyendo skins)
-                  io.to(salaId).emit('inicio-partida-serpientes', {
-                      salaId: salaId,
-                      jugadores: sala.jugadores
-                  });
-                  
+                  io.to(salaId).emit('inicio-partida-serpientes', { salaId: salaId, jugadores: sala.jugadores });
                   io.to(salaId).emit('turno-asignado', sala.jugadores[0].nickname);
-              }, tiempoEspera);
+              }
+          }, tiempoEspera);
+      }
+  });
+
+  // --- SALIR DE ESPERA (REEMBOLSO) ---
+  socket.on('salir-sala-espera', async (salaId) => {
+      const sala = salasSerpientes[salaId];
+      // Solo si NO ha iniciado o es vs CPU (aunque vs CPU inicia rápido, esto es seguro)
+      if (sala && (!sala.enJuego || sala.esVsCpu)) {
+          const index = sala.jugadores.findIndex(j => j.id === socket.id);
+          if (index !== -1) {
+              const jugador = sala.jugadores[index];
+              const reembolso = sala.apuesta;
+
+              // Reembolsar
+              const userRef = db.collection('usuarios').doc(jugador.email);
+              await userRef.update({ monedas: admin.firestore.FieldValue.increment(reembolso) });
+              await registrarMovimiento(jugador.email, 'reembolso', reembolso, 'Salida Sala', true);
+              
+              const docUpd = await userRef.get();
+              socket.emit('usuario-actualizado', docUpd.data());
+              socket.emit('reembolso-exitoso', docUpd.data().monedas);
+
+              sala.jugadores.splice(index, 1);
+              socket.leave(salaId);
+
+              // Limpieza sala
+              if (sala.jugadores.length === 0 || sala.esVsCpu) {
+                  delete salasSerpientes[salaId];
+              } else {
+                  io.to(salaId).emit('jugador-entro', sala.jugadores.length);
+              }
           }
       }
   });
 
-  socket.on('tirar-dado-serpientes', (salaId) => {
-      procesarTurno(salaId, socket.id);
-  });
+  socket.on('tirar-dado-serpientes', (salaId) => { procesarTurno(salaId, socket.id); });
 
   function procesarTurno(salaId, solicitanteId) {
       const sala = salasSerpientes[salaId];
       if (!sala || !sala.enJuego) return;
 
       const jugadorActual = sala.jugadores[sala.turnoIndex];
-
       if (!jugadorActual.esBot && jugadorActual.id !== solicitanteId) return;
 
       const dado = Math.floor(Math.random() * 6) + 1;
       let nuevaPos = jugadorActual.posicion + dado;
 
-      if (nuevaPos > 54) {
-          const sobrante = nuevaPos - 54;
-          nuevaPos = 54 - sobrante;
-      }
+      if (nuevaPos > 54) { nuevaPos = 54 - (nuevaPos - 54); }
 
-      let esSerpiente = false;
-      let esEscalera = false;
-
-      if (SNAKES[nuevaPos]) {
-          nuevaPos = SNAKES[nuevaPos];
-          esSerpiente = true;
-      } else if (LADDERS[nuevaPos]) {
-          nuevaPos = LADDERS[nuevaPos];
-          esEscalera = true;
-      }
+      let esSerpiente = false; let esEscalera = false;
+      if (SNAKES[nuevaPos]) { nuevaPos = SNAKES[nuevaPos]; esSerpiente = true; } 
+      else if (LADDERS[nuevaPos]) { nuevaPos = LADDERS[nuevaPos]; esEscalera = true; }
 
       const posAnterior = jugadorActual.posicion;
       jugadorActual.posicion = nuevaPos;
 
       io.to(salaId).emit('movimiento-jugador', {
-          nickname: jugadorActual.nickname,
-          dado,
-          posAnterior: posAnterior,
-          posNueva: nuevaPos,
-          esSerpiente,
-          esEscalera
+          nickname: jugadorActual.nickname, dado, posAnterior, posNueva: nuevaPos, esSerpiente, esEscalera
       });
 
       if (nuevaPos === 54) {
@@ -988,30 +981,40 @@ io.on('connection', (socket) => {
       } else {
           sala.turnoIndex = (sala.turnoIndex + 1) % sala.jugadores.length;
           const siguienteJugador = sala.jugadores[sala.turnoIndex];
-          
           io.to(salaId).emit('turno-asignado', siguienteJugador.nickname);
 
           if (siguienteJugador.esBot) {
-              setTimeout(() => {
-                  procesarTurno(salaId, 'sistema'); 
-              }, 5000); 
+              setTimeout(() => { procesarTurno(salaId, 'sistema'); }, 5000); 
           }
       }
   }
 
   async function finalizarJuegoSerpientes(sala, ganador) {
       const premio = sala.bote;
-      
       if (!ganador.esBot) {
           const userRef = db.collection('usuarios').doc(ganador.email);
           await userRef.update({ monedas: admin.firestore.FieldValue.increment(premio) });
           await registrarMovimiento(ganador.email, 'victoria', premio, 'Ganador Serpientes', true);
       }
-
       io.to(sala.id).emit('fin-juego-serpientes', { ganador: ganador.nickname, premio });
       delete salasSerpientes[sala.id];
   }
 
+  // --- DESCONEXIÓN ---
+  socket.on('disconnect', () => {
+      for (const sId in salasSerpientes) {
+          const sala = salasSerpientes[sId];
+          const idx = sala.jugadores.findIndex(j => j.id === socket.id);
+          if (idx !== -1) {
+              sala.jugadores.splice(idx, 1);
+              if (sala.jugadores.length === 0) delete salasSerpientes[sId];
+              else {
+                  if(!sala.enJuego) io.to(sId).emit('jugador-entro', sala.jugadores.length);
+              }
+          }
+      }
+  });
+  
   socket.on('disconnect', () => {
     console.log('Jugador desconectado:', socket.id);
     setTimeout(async () => {
