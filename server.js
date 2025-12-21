@@ -795,11 +795,8 @@ io.on('connection', (socket) => {
   });
   
 // =========================================================
-  // 🐍 BLOQUE COMPLETO SERPIENTES (BACKEND + CPU LENTO) 🐍
+  // 🐍 BLOQUE SERPIENTES (LÓGICA BLINDADA) 🐍
   // =========================================================
-
-  // (Asegúrate que salasSerpientes esté declarado al inicio del archivo si lo usas globalmente)
-  // const salasSerpientes = {}; 
 
   const SNAKES = { 18:6, 25:9, 33:19, 41:24, 48:32, 53:13 };
   const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
@@ -859,6 +856,7 @@ io.on('connection', (socket) => {
       const sala = salasSerpientes[salaId];
       socket.join(salaId);
 
+      // Agregar Jugador (Posición inicial explícita: 1)
       sala.jugadores.push({ 
           id: socket.id, 
           email, 
@@ -886,13 +884,19 @@ io.on('connection', (socket) => {
 
       if (listosParaIniciar && !sala.enJuego) {
           if (!sala.timerInicio) {
-              const tiempoEspera = sala.esVsCpu ? 1500 : 5000; 
-              if(!sala.esVsCpu) io.to(salaId).emit('notificacion', 'Iniciando en 5s...');
+              const tiempoEspera = sala.esVsCpu ? 1000 : 4000;
+              if(!sala.esVsCpu) io.to(salaId).emit('notificacion', 'Iniciando partida...');
               
               sala.timerInicio = setTimeout(() => {
                   sala.enJuego = true;
                   sala.timerInicio = null;
-                  io.to(salaId).emit('inicio-partida-serpientes', salaId);
+                  
+                  // ENVIAR POSICIONES INICIALES (Todos en 1)
+                  io.to(salaId).emit('inicio-partida-serpientes', {
+                      salaId: salaId,
+                      jugadores: sala.jugadores // Enviamos la lista para pintarlos en el 1
+                  });
+                  
                   io.to(salaId).emit('turno-asignado', sala.jugadores[0].nickname);
               }, tiempoEspera);
           }
@@ -909,11 +913,13 @@ io.on('connection', (socket) => {
 
       const jugadorActual = sala.jugadores[sala.turnoIndex];
 
+      // Anti-hack: Validar turno
       if (!jugadorActual.esBot && jugadorActual.id !== solicitanteId) return;
 
       const dado = Math.floor(Math.random() * 6) + 1;
       let nuevaPos = jugadorActual.posicion + dado;
 
+      // Lógica de Rebote (Si estás en 50 y sacas 6, llegas a 56 -> rebotas a 52)
       if (nuevaPos > 54) {
           const sobrante = nuevaPos - 54;
           nuevaPos = 54 - sobrante;
@@ -922,6 +928,7 @@ io.on('connection', (socket) => {
       let esSerpiente = false;
       let esEscalera = false;
 
+      // Validar casillas especiales
       if (SNAKES[nuevaPos]) {
           nuevaPos = SNAKES[nuevaPos];
           esSerpiente = true;
@@ -930,32 +937,35 @@ io.on('connection', (socket) => {
           esEscalera = true;
       }
 
+      const posAnterior = jugadorActual.posicion;
       jugadorActual.posicion = nuevaPos;
 
+      // Emitir movimiento
       io.to(salaId).emit('movimiento-jugador', {
           nickname: jugadorActual.nickname,
           dado,
-          posAnterior: jugadorActual.posicion, // Esto ayuda a la animación local
+          posAnterior: posAnterior,
           posNueva: nuevaPos,
           esSerpiente,
           esEscalera
       });
 
+      // VERIFICAR VICTORIA (Exacta en 54)
       if (nuevaPos === 54) {
           sala.enJuego = false;
           finalizarJuegoSerpientes(sala, jugadorActual);
       } else {
+          // Siguiente Turno
           sala.turnoIndex = (sala.turnoIndex + 1) % sala.jugadores.length;
           const siguienteJugador = sala.jugadores[sala.turnoIndex];
           
           io.to(salaId).emit('turno-asignado', siguienteJugador.nickname);
 
+          // Turno del Bot
           if (siguienteJugador.esBot) {
-              // TIEMPO DE ESPERA DEL BOT: 3 a 4 segundos
-              // Esto permite que el usuario vea la animación anterior con calma
               setTimeout(() => {
                   procesarTurno(salaId, 'sistema'); 
-              }, 3000); 
+              }, 2500); // 2.5s para darle ritmo
           }
       }
   }
@@ -963,6 +973,7 @@ io.on('connection', (socket) => {
   async function finalizarJuegoSerpientes(sala, ganador) {
       const premio = sala.bote;
       
+      // Pagar solo si gana humano
       if (!ganador.esBot) {
           const userRef = db.collection('usuarios').doc(ganador.email);
           await userRef.update({ monedas: admin.firestore.FieldValue.increment(premio) });
