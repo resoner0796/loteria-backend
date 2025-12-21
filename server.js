@@ -276,7 +276,7 @@ async function actualizarSaldoUsuario(jugador) {
 
 // ==================== PAGOS STRIPE (SOPORTE MULTI-DOMINIO) ====================
 
-const FRONTEND_LOTERIA = "https://loteria-online-red.vercel.app"; 
+const FRONTEND_LOTERIA = "https://loteria.juegosenlanube.com"; 
 const FRONTEND_HUB = "https://juegosenlanube.com"; // TU NUEVO DOMINIO
 const BACKEND_URL = "https://loteria-backend-3nde.onrender.com";
 
