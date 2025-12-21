@@ -994,7 +994,7 @@ io.on('connection', (socket) => {
           if (siguienteJugador.esBot) {
               setTimeout(() => {
                   procesarTurno(salaId, 'sistema'); 
-              }, 2500); 
+              }, 5000); 
           }
       }
   }
