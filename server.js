@@ -935,3 +935,26 @@ app.delete('/api/hub/eliminar-juego/:id', async (req, res) => {
 http.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
+
+
+// ACTUALIZAR PERFIL (HUB)
+app.post('/api/actualizar-perfil', async (req, res) => {
+    const { email, nickname, avatar } = req.body;
+    
+    if (!email || !nickname) return res.status(400).json({ error: "Faltan datos" });
+
+    try {
+        const userRef = db.collection('usuarios').doc(email);
+        
+        // Actualizamos en la DB
+        await userRef.update({ 
+            nickname: nickname,
+            avatar: avatar || 'assets/avatar.png' 
+        });
+
+        res.json({ success: true });
+    } catch (error) {
+        console.error("Error actualización perfil:", error);
+        res.status(500).json({ error: "Error al actualizar perfil" });
+    }
+});
