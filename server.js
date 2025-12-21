@@ -792,6 +792,171 @@ io.on('connection', (socket) => {
         }
     }
   });
+  
+  // =========================================================
+// 🐍 LÓGICA SERPIENTES Y ESCALERAS (BACKEND) 🐍
+// =========================================================
+
+// Estructura para salas de serpientes (Separada de lotería para no mezclar)
+const salasSerpientes = {}; 
+const SNAKES = { 18:6, 25:9, 33:19, 41:24, 48:32, 53:13 };
+const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
+
+socket.on('entrar-serpientes', async ({ email, nickname, apuesta }) => {
+    const monto = parseInt(apuesta);
+    
+    // 1. Validar Saldo en BD (Seguridad extra)
+    const userRef = db.collection('usuarios').doc(email);
+    const doc = await userRef.get();
+    if (!doc.exists || doc.data().monedas < monto) {
+        socket.emit('error-apuesta', 'Saldo insuficiente en servidor');
+        return;
+    }
+
+    // 2. Cobrar Entrada
+    await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
+    await registrarMovimiento(email, 'apuesta', monto, 'Entrada Serpientes', false);
+    
+    // Actualizar cliente
+    const nuevoDoc = await userRef.get();
+    socket.emit('usuario-actualizado', nuevoDoc.data());
+
+    // 3. Matchmaking Simple (Buscar sala disponible o crear una)
+    // Buscamos una sala que tenga gente pero no esté llena (max 4) y sea del mismo monto
+    let salaId = Object.keys(salasSerpientes).find(id => 
+        salasSerpientes[id].apuesta === monto && 
+        salasSerpientes[id].jugadores.length < 4 && 
+        !salasSerpientes[id].enJuego
+    );
+
+    if (!salaId) {
+        salaId = `snake_${Date.now()}`;
+        salasSerpientes[salaId] = {
+            id: salaId,
+            apuesta: monto,
+            jugadores: [],
+            turnoIndex: 0,
+            enJuego: false,
+            bote: 0
+        };
+    }
+
+    const sala = salasSerpientes[salaId];
+    socket.join(salaId);
+
+    // Agregar jugador a la sala
+    sala.jugadores.push({
+        id: socket.id,
+        email,
+        nickname,
+        posicion: 1 // Todos inician en la 1
+    });
+    sala.bote += monto;
+
+    console.log(`🐍 ${nickname} entró a sala ${salaId} ($${monto})`);
+
+    // Si hay 2 o más jugadores, iniciar juego (o esperar a 4, como prefieras)
+    // Aquí arrancamos si hay al menos 2 y esperamos 5 segs para ver si entra otro
+    if (sala.jugadores.length >= 2 && !sala.enJuego) {
+        if (!sala.timerInicio) {
+            io.to(salaId).emit('notificacion', 'Juego inicia en 5 segundos...');
+            sala.timerInicio = setTimeout(() => {
+                sala.enJuego = true;
+                sala.timerInicio = null;
+                io.to(salaId).emit('inicio-partida-serpientes', salaId);
+                // Asignar primer turno
+                io.to(salaId).emit('turno-asignado', sala.jugadores[0].nickname);
+            }, 5000);
+        }
+    }
+});
+
+socket.on('tirar-dado-serpientes', (salaId) => {
+    const sala = salasSerpientes[salaId];
+    if (!sala || !sala.enJuego) return;
+
+    const jugadorActual = sala.jugadores[sala.turnoIndex];
+    if (jugadorActual.id !== socket.id) return; // No es su turno (Anti-hack)
+
+    // 1. Calcular Dado
+    const dado = Math.floor(Math.random() * 6) + 1;
+    let nuevaPos = jugadorActual.posicion + dado;
+
+    // Rebote si se pasa de 54
+    if (nuevaPos > 54) {
+        const sobrante = nuevaPos - 54;
+        nuevaPos = 54 - sobrante;
+    }
+
+    // 2. Verificar Serpientes y Escaleras
+    let esSerpiente = false;
+    let esEscalera = false;
+
+    if (SNAKES[nuevaPos]) {
+        nuevaPos = SNAKES[nuevaPos];
+        esSerpiente = true;
+    } else if (LADDERS[nuevaPos]) {
+        nuevaPos = LADDERS[nuevaPos];
+        esEscalera = true;
+    }
+
+    jugadorActual.posicion = nuevaPos;
+
+    // 3. Emitir movimiento a todos
+    io.to(salaId).emit('movimiento-jugador', {
+        nickname: jugadorActual.nickname,
+        dado,
+        posAnterior: jugadorActual.posicion, // Dato histórico
+        posNueva: nuevaPos,
+        esSerpiente,
+        esEscalera
+    });
+
+    // 4. Verificar Victoria
+    if (nuevaPos === 54) {
+        sala.enJuego = false;
+        finalizarJuegoSerpientes(sala, jugadorActual);
+    } else {
+        // Pasar Turno
+        sala.turnoIndex = (sala.turnoIndex + 1) % sala.jugadores.length;
+        io.to(salaId).emit('turno-asignado', sala.jugadores[sala.turnoIndex].nickname);
+    }
+});
+
+async function finalizarJuegoSerpientes(sala, ganador) {
+    const premio = sala.bote;
+    
+    // Pagar al ganador
+    const userRef = db.collection('usuarios').doc(ganador.email);
+    await userRef.update({ monedas: admin.firestore.FieldValue.increment(premio) });
+    await registrarMovimiento(ganador.email, 'victoria', premio, 'Ganador Serpientes', true);
+
+    io.to(sala.id).emit('fin-juego-serpientes', { ganador: ganador.nickname, premio });
+    
+    // Limpieza de sala
+    delete salasSerpientes[sala.id];
+}
+
+// Limpieza si se desconectan de serpientes
+socket.on('disconnect', () => {
+    // Buscar si estaba en una sala de serpientes
+    for (const salaId in salasSerpientes) {
+        const sala = salasSerpientes[salaId];
+        const index = sala.jugadores.findIndex(j => j.id === socket.id);
+        
+        if (index !== -1) {
+            // Sacarlo de la lista
+            sala.jugadores.splice(index, 1);
+            
+            // Si estaba en juego, abortar o pasar turno (lógica simple: abortar si quedan < 2)
+            if (sala.enJuego && sala.jugadores.length < 2) {
+                io.to(salaId).emit('notificacion', 'Jugador desconectado. Partida cancelada.');
+                // Aquí podrías implementar reembolso si quieres ser buena onda
+                delete salasSerpientes[salaId];
+            }
+        }
+    }
+});
 
   socket.on('disconnect', () => {
     console.log('Jugador desconectado:', socket.id);
