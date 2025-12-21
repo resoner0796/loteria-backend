@@ -1177,3 +1177,45 @@ app.post('/api/actualizar-perfil', async (req, res) => {
         res.status(500).json({ error: "Error al actualizar perfil" });
     }
 });
+
+// --- SALIR DE SALA DE ESPERA (REEMBOLSO) ---
+  socket.on('salir-sala-espera', async (salaId) => {
+      const sala = salasSerpientes[salaId];
+      
+      // Solo reembolsamos si la sala existe y el juego NO ha iniciado (o si es vs CPU)
+      if (sala && (!sala.enJuego || sala.esVsCpu)) {
+          
+          // Buscar al jugador en la sala
+          const index = sala.jugadores.findIndex(j => j.id === socket.id);
+          
+          if (index !== -1) {
+              const jugador = sala.jugadores[index];
+              const reembolso = sala.apuesta;
+
+              // 1. Devolver dinero en BD
+              const userRef = db.collection('usuarios').doc(jugador.email);
+              await userRef.update({ monedas: admin.firestore.FieldValue.increment(reembolso) });
+              await registrarMovimiento(jugador.email, 'reembolso', reembolso, 'Salida de Sala', true);
+              
+              // 2. Sacarlo de la lista
+              sala.jugadores.splice(index, 1);
+              
+              // 3. Avisar al cliente su nuevo saldo
+              const docUpdated = await userRef.get();
+              socket.emit('usuario-actualizado', docUpdated.data()); // Esto actualiza el monedero visual
+              socket.emit('reembolso-exitoso', docUpdated.data().monedas);
+
+              // 4. Si la sala se queda vacía, borrarla
+              if (sala.jugadores.length === 0 || (sala.esVsCpu)) { // Si es CPU y sale el humano, borrar
+                  delete salasSerpientes[salaId];
+                  console.log(`🗑️ Sala ${salaId} eliminada (Vacía/Cancelada)`);
+              } else {
+                  // Si quedan otros, avisarles
+                  io.to(salaId).emit('jugador-entro', sala.jugadores.length);
+              }
+              
+              socket.leave(salaId);
+              console.log(`↩️ ${jugador.nickname} salió de espera y recibió reembolso.`);
+          }
+      }
+  });
