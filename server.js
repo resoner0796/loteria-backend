@@ -795,14 +795,48 @@ io.on('connection', (socket) => {
   });
   
 // =========================================================
-  // 🐍 BLOQUE SERPIENTES (LÓGICA BLINDADA) 🐍
+  // 🐍 BLOQUE SERPIENTES + TIENDA (BACKEND) 🐍
   // =========================================================
 
   const SNAKES = { 18:6, 25:9, 33:19, 41:24, 48:32, 53:13 };
   const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
 
+  // --- TIENDA DE SKINS ---
+  socket.on('comprar-skin', async ({ email, itemId, precio }) => {
+      try {
+          const userRef = db.collection('usuarios').doc(email);
+          await db.runTransaction(async (t) => {
+              const doc = await t.get(userRef);
+              if (!doc.exists) return;
+              
+              const data = doc.data();
+              const monedas = data.monedas || 0;
+              const inventario = data.inventario || [];
+
+              // Validaciones
+              if (monedas < precio) return;
+              if (inventario.includes(itemId)) return;
+
+              // Cobrar y Entregar
+              t.update(userRef, {
+                  monedas: monedas - precio,
+                  inventario: admin.firestore.FieldValue.arrayUnion(itemId)
+              });
+          });
+
+          // Enviar actualización
+          const docFinal = await userRef.get();
+          socket.emit('usuario-actualizado', docFinal.data());
+          // Log historial
+          await registrarMovimiento(email, 'compra', precio, `Skin: ${itemId}`, false);
+
+      } catch (e) {
+          console.error("Error compra skin:", e);
+      }
+  });
+
   // --- ENTRADA AL JUEGO ---
-  socket.on('entrar-serpientes', async ({ email, nickname, apuesta, vsCpu }) => {
+  socket.on('entrar-serpientes', async ({ email, nickname, apuesta, vsCpu, skin }) => {
       const monto = parseInt(apuesta);
       
       const userRef = db.collection('usuarios').doc(email);
@@ -856,13 +890,14 @@ io.on('connection', (socket) => {
       const sala = salasSerpientes[salaId];
       socket.join(salaId);
 
-      // Agregar Jugador (Posición inicial explícita: 1)
+      // Guardamos la SKIN del jugador en el objeto
       sala.jugadores.push({ 
           id: socket.id, 
           email, 
           nickname, 
           posicion: 1, 
-          esBot: false 
+          esBot: false,
+          skin: skin || '🔵' // Guardar skin
       });
       
       if (!sala.esVsCpu) sala.bote += monto; 
@@ -873,7 +908,8 @@ io.on('connection', (socket) => {
               email: 'banca@juegosenlanube.com',
               nickname: '🤖 La Banca',
               posicion: 1,
-              esBot: true
+              esBot: true,
+              skin: '🤖'
           });
       }
 
@@ -891,10 +927,10 @@ io.on('connection', (socket) => {
                   sala.enJuego = true;
                   sala.timerInicio = null;
                   
-                  // ENVIAR POSICIONES INICIALES (Todos en 1)
+                  // ENVIAR LISTA COMPLETA (incluyendo skins)
                   io.to(salaId).emit('inicio-partida-serpientes', {
                       salaId: salaId,
-                      jugadores: sala.jugadores // Enviamos la lista para pintarlos en el 1
+                      jugadores: sala.jugadores
                   });
                   
                   io.to(salaId).emit('turno-asignado', sala.jugadores[0].nickname);
@@ -913,13 +949,11 @@ io.on('connection', (socket) => {
 
       const jugadorActual = sala.jugadores[sala.turnoIndex];
 
-      // Anti-hack: Validar turno
       if (!jugadorActual.esBot && jugadorActual.id !== solicitanteId) return;
 
       const dado = Math.floor(Math.random() * 6) + 1;
       let nuevaPos = jugadorActual.posicion + dado;
 
-      // Lógica de Rebote (Si estás en 50 y sacas 6, llegas a 56 -> rebotas a 52)
       if (nuevaPos > 54) {
           const sobrante = nuevaPos - 54;
           nuevaPos = 54 - sobrante;
@@ -928,7 +962,6 @@ io.on('connection', (socket) => {
       let esSerpiente = false;
       let esEscalera = false;
 
-      // Validar casillas especiales
       if (SNAKES[nuevaPos]) {
           nuevaPos = SNAKES[nuevaPos];
           esSerpiente = true;
@@ -940,7 +973,6 @@ io.on('connection', (socket) => {
       const posAnterior = jugadorActual.posicion;
       jugadorActual.posicion = nuevaPos;
 
-      // Emitir movimiento
       io.to(salaId).emit('movimiento-jugador', {
           nickname: jugadorActual.nickname,
           dado,
@@ -950,22 +982,19 @@ io.on('connection', (socket) => {
           esEscalera
       });
 
-      // VERIFICAR VICTORIA (Exacta en 54)
       if (nuevaPos === 54) {
           sala.enJuego = false;
           finalizarJuegoSerpientes(sala, jugadorActual);
       } else {
-          // Siguiente Turno
           sala.turnoIndex = (sala.turnoIndex + 1) % sala.jugadores.length;
           const siguienteJugador = sala.jugadores[sala.turnoIndex];
           
           io.to(salaId).emit('turno-asignado', siguienteJugador.nickname);
 
-          // Turno del Bot
           if (siguienteJugador.esBot) {
               setTimeout(() => {
                   procesarTurno(salaId, 'sistema'); 
-              }, 2500); // 2.5s para darle ritmo
+              }, 2500); 
           }
       }
   }
@@ -973,7 +1002,6 @@ io.on('connection', (socket) => {
   async function finalizarJuegoSerpientes(sala, ganador) {
       const premio = sala.bote;
       
-      // Pagar solo si gana humano
       if (!ganador.esBot) {
           const userRef = db.collection('usuarios').doc(ganador.email);
           await userRef.update({ monedas: admin.firestore.FieldValue.increment(premio) });
