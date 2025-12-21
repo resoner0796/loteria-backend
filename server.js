@@ -795,19 +795,14 @@ io.on('connection', (socket) => {
   });
   
 // =========================================================
-  // 🐍 BLOQUE COMPLETO SERPIENTES Y ESCALERAS (BACKEND) 🐍
+  // 🐍 BLOQUE COMPLETO SERPIENTES (BACKEND + CPU) 🐍
   // =========================================================
-
-  // Variables globales (Poner fuera del io.on si quieres persistencia total, 
-  // pero dentro funciona bien si las declaras al inicio del server.js)
-  // Para este bloque, asumo que 'salasSerpientes' está declarada arriba junto con 'salas'.
-  // Si no, descomenta la siguiente línea y ponla AL INICIO de server.js:
-  // const salasSerpientes = {}; 
 
   const SNAKES = { 18:6, 25:9, 33:19, 41:24, 48:32, 53:13 };
   const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
 
-  socket.on('entrar-serpientes', async ({ email, nickname, apuesta }) => {
+  // --- ENTRADA AL JUEGO ---
+  socket.on('entrar-serpientes', async ({ email, nickname, apuesta, vsCpu }) => {
       const monto = parseInt(apuesta);
       
       // 1. Validar Saldo
@@ -820,71 +815,117 @@ io.on('connection', (socket) => {
 
       // 2. Cobrar Entrada
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
-      await registrarMovimiento(email, 'apuesta', monto, 'Entrada Serpientes', false);
+      await registrarMovimiento(email, 'apuesta', monto, 'Serpientes', false);
       
       const nuevoDoc = await userRef.get();
       socket.emit('usuario-actualizado', nuevoDoc.data());
 
-      // 3. Matchmaking (Buscar sala disponible)
-      let salaId = Object.keys(salasSerpientes).find(id => 
-          salasSerpientes[id].apuesta === monto && 
-          salasSerpientes[id].jugadores.length < 4 && 
-          !salasSerpientes[id].enJuego
-      );
+      let salaId = null;
 
-      if (!salaId) {
-          salaId = `mesa_${monto}_${Date.now().toString().slice(-4)}`;
+      // 3. Lógica de Sala (CPU vs Multiplayer)
+      if (vsCpu) {
+          // MODO VS BANCA: Sala Privada
+          salaId = `cpu_${socket.id}_${Date.now()}`;
           salasSerpientes[salaId] = {
               id: salaId,
               apuesta: monto,
               jugadores: [],
               turnoIndex: 0,
               enJuego: false,
-              bote: 0
+              bote: monto * 2, // El premio es: tu apuesta + la apuesta de la banca
+              esVsCpu: true // Bandera importante
           };
+          console.log(`🤖 ${nickname} vs Banca en ${salaId}`);
+      } else {
+          // MODO MULTIPLAYER: Buscar sala pública
+          salaId = Object.keys(salasSerpientes).find(id => 
+              !salasSerpientes[id].esVsCpu && // No entrar a salas de CPU
+              salasSerpientes[id].apuesta === monto && 
+              salasSerpientes[id].jugadores.length < 4 && 
+              !salasSerpientes[id].enJuego
+          );
+
+          if (!salaId) {
+              salaId = `mesa_${monto}_${Date.now().toString().slice(-4)}`;
+              salasSerpientes[salaId] = {
+                  id: salaId,
+                  apuesta: monto,
+                  jugadores: [],
+                  turnoIndex: 0,
+                  enJuego: false,
+                  bote: 0,
+                  esVsCpu: false
+              };
+          }
       }
 
       const sala = salasSerpientes[salaId];
       socket.join(salaId);
 
-      // Agregar jugador
-      sala.jugadores.push({ id: socket.id, email, nickname, posicion: 1 });
-      sala.bote += monto;
-
-      // === NOTIFICACIONES DE SALA (NUEVO) ===
-      // Avisar al usuario actual dónde está y cuántos hay
-      socket.emit('sala-conectada', { 
-          salaId: salaId, 
-          jugadoresConectados: sala.jugadores.length 
+      // Agregar al Humano
+      sala.jugadores.push({ 
+          id: socket.id, 
+          email, 
+          nickname, 
+          posicion: 1, 
+          esBot: false 
       });
+      
+      if (!sala.esVsCpu) sala.bote += monto; // En multiplayer sumamos al bote
 
-      // Avisar a los demás que entró alguien
+      // Agregar a la Banca si es modo CPU
+      if (sala.esVsCpu) {
+          sala.jugadores.push({
+              id: 'cpu_bot',
+              email: 'banca@juegosenlanube.com',
+              nickname: '🤖 La Banca',
+              posicion: 1,
+              esBot: true
+          });
+      }
+
+      // Notificaciones
+      socket.emit('sala-conectada', { salaId: salaId, jugadoresConectados: sala.jugadores.length });
       io.to(salaId).emit('jugador-entro', sala.jugadores.length);
 
-      console.log(`🐍 ${nickname} entró a ${salaId} ($${monto}). Total: ${sala.jugadores.length}`);
+      // --- INICIO DE JUEGO ---
+      // Si es vs CPU, inicia YA. Si es multi, espera a tener >= 2
+      const listosParaIniciar = sala.esVsCpu || (sala.jugadores.length >= 2);
 
-      // Iniciar juego si hay >= 2 jugadores
-      if (sala.jugadores.length >= 2 && !sala.enJuego) {
+      if (listosParaIniciar && !sala.enJuego) {
           if (!sala.timerInicio) {
-              io.to(salaId).emit('notificacion', 'Iniciando en 5s...');
+              const tiempoEspera = sala.esVsCpu ? 1000 : 5000; // Vs CPU inicia rápido
+              if(!sala.esVsCpu) io.to(salaId).emit('notificacion', 'Iniciando en 5s...');
+              
               sala.timerInicio = setTimeout(() => {
                   sala.enJuego = true;
                   sala.timerInicio = null;
                   io.to(salaId).emit('inicio-partida-serpientes', salaId);
+                  
+                  // Asignar primer turno
                   io.to(salaId).emit('turno-asignado', sala.jugadores[0].nickname);
-              }, 5000);
+              }, tiempoEspera);
           }
       }
   });
 
+  // --- TIRO DE DADO ---
   socket.on('tirar-dado-serpientes', (salaId) => {
+      procesarTurno(salaId, socket.id);
+  });
+
+  // Función unificada para procesar turnos (Humano o Bot)
+  function procesarTurno(salaId, solicitanteId) {
       const sala = salasSerpientes[salaId];
       if (!sala || !sala.enJuego) return;
 
       const jugadorActual = sala.jugadores[sala.turnoIndex];
-      if (jugadorActual.id !== socket.id) return; 
 
-      // Lógica de movimiento
+      // Validar que sea el turno correcto
+      // Si es bot, solicitanteId será 'sistema', si es humano, debe coincidir el socket
+      if (!jugadorActual.esBot && jugadorActual.id !== solicitanteId) return;
+
+      // 1. Calcular Movimiento
       const dado = Math.floor(Math.random() * 6) + 1;
       let nuevaPos = jugadorActual.posicion + dado;
 
@@ -906,6 +947,7 @@ io.on('connection', (socket) => {
 
       jugadorActual.posicion = nuevaPos;
 
+      // 2. Emitir
       io.to(salaId).emit('movimiento-jugador', {
           nickname: jugadorActual.nickname,
           dado,
@@ -915,20 +957,35 @@ io.on('connection', (socket) => {
           esEscalera
       });
 
+      // 3. Verificar Victoria o Siguiente Turno
       if (nuevaPos === 54) {
           sala.enJuego = false;
           finalizarJuegoSerpientes(sala, jugadorActual);
       } else {
+          // Avanzar turno
           sala.turnoIndex = (sala.turnoIndex + 1) % sala.jugadores.length;
-          io.to(salaId).emit('turno-asignado', sala.jugadores[sala.turnoIndex].nickname);
+          const siguienteJugador = sala.jugadores[sala.turnoIndex];
+          
+          io.to(salaId).emit('turno-asignado', siguienteJugador.nickname);
+
+          // Si el siguiente es BOT, activar su turno automáticamente
+          if (siguienteJugador.esBot) {
+              setTimeout(() => {
+                  procesarTurno(salaId, 'sistema'); // 'sistema' bypasses ID check for bots
+              }, 2000); // 2 segundos para que se sienta natural
+          }
       }
-  });
+  }
 
   async function finalizarJuegoSerpientes(sala, ganador) {
       const premio = sala.bote;
-      const userRef = db.collection('usuarios').doc(ganador.email);
-      await userRef.update({ monedas: admin.firestore.FieldValue.increment(premio) });
-      await registrarMovimiento(ganador.email, 'victoria', premio, 'Ganador Serpientes', true);
+      
+      // Solo pagamos si gana un Humano. Si gana el bot, la casa se queda el dinero.
+      if (!ganador.esBot) {
+          const userRef = db.collection('usuarios').doc(ganador.email);
+          await userRef.update({ monedas: admin.firestore.FieldValue.increment(premio) });
+          await registrarMovimiento(ganador.email, 'victoria', premio, 'Ganador Serpientes', true);
+      }
 
       io.to(sala.id).emit('fin-juego-serpientes', { ganador: ganador.nickname, premio });
       delete salasSerpientes[sala.id];
