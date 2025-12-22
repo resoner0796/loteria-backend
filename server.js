@@ -631,6 +631,199 @@ io.on('connection', (socket) => {
       io.to(sala).emit("reproducir-efecto-sonido", { soundId, emisor });
   });
 
+
+// =========================================================
+// 🌀 BLOQUE PIRINOLA ROYAL (MODO VS CPU & MULTI) 🌀
+// =========================================================
+
+// (Asegúrate de tener: const salasPirinola = {}; al inicio del archivo)
+
+  // --- ENTRAR A PIRINOLA ---
+  socket.on('entrar-pirinola', async ({ email, nickname, apuesta, vsCpu }) => {
+      const monto = parseInt(apuesta);
+      const userRef = db.collection('usuarios').doc(email);
+      const doc = await userRef.get();
+      
+      if (!doc.exists || doc.data().monedas < monto) {
+          socket.emit('error-apuesta', 'Saldo insuficiente');
+          return;
+      }
+
+      // Cobrar Entrada (Ante)
+      await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
+      await registrarMovimiento(email, 'apuesta', monto, 'Pirinola Royal', false);
+      const nuevoDoc = await userRef.get();
+      socket.emit('usuario-actualizado', nuevoDoc.data());
+
+      let salaId = null;
+
+      // Lógica de Matchmaking o Crear Sala
+      if (vsCpu) {
+          salaId = `cpu_${socket.id}_${Date.now()}`;
+          salasPirinola[salaId] = {
+              id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, enJuego: false, esVsCpu: true
+          };
+      } else {
+          salaId = Object.keys(salasPirinola).find(id => 
+              !salasPirinola[id].esVsCpu && // No unir a salas de CPU
+              salasPirinola[id].apuesta === monto && 
+              salasPirinola[id].jugadores.length < 6 && 
+              !salasPirinola[id].enJuego
+          );
+
+          if (!salaId) {
+              salaId = `pirinola_${monto}_${Date.now()}`;
+              salasPirinola[salaId] = {
+                  id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, enJuego: false, esVsCpu: false
+              };
+          }
+      }
+
+      const sala = salasPirinola[salaId];
+      socket.join(salaId);
+
+      // Agregar HUMANO
+      sala.jugadores.push({ id: socket.id, email, nickname, esBot: false });
+      sala.bote += monto; // Pone su entrada
+
+      // Si es Vs CPU, agregar al BOT y poner su entrada
+      if(vsCpu) {
+          sala.jugadores.push({ id: 'bot_banca', email: 'banca', nickname: '🤖 La Banca', esBot: true });
+          sala.bote += monto; // La banca iguala la entrada
+      }
+
+      socket.emit('sala-encontrada', sala);
+      io.to(salaId).emit('actualizar-estado-pirinola', sala);
+
+      // Iniciar Juego
+      const jugadoresNecesarios = vsCpu ? 2 : 2; // Minimo 2 para multi
+      if (sala.jugadores.length >= jugadoresNecesarios && !sala.enJuego) {
+          if(sala.timerInicio) clearTimeout(sala.timerInicio);
+          
+          const tiempoEspera = vsCpu ? 1000 : 3000;
+          sala.timerInicio = setTimeout(() => {
+              sala.enJuego = true;
+              io.to(salaId).emit('notificacion', '¡Juego Iniciado!');
+              sala.turnoIndex = Math.floor(Math.random() * sala.jugadores.length); // Turno random
+              io.to(salaId).emit('actualizar-estado-pirinola', sala);
+              
+              // Si le toca al bot iniciar
+              verificarTurnoBot(sala);
+
+          }, tiempoEspera);
+      }
+  });
+
+  // --- TIRAR PIRINOLA (Humano) ---
+  socket.on('tirar-pirinola', (salaId) => {
+      procesarTurno(salaId, socket.id);
+  });
+
+  // --- LÓGICA CENTRAL DE TURNOS ---
+  function procesarTurno(salaId, solicitanteId) {
+      const sala = salasPirinola[salaId];
+      if (!sala || !sala.enJuego) return;
+
+      const jugador = sala.jugadores[sala.turnoIndex];
+      
+      // Validar que sea turno del que llama (o si es el sistema llamando al bot)
+      if (solicitanteId !== 'sistema' && jugador.id !== solicitanteId) return;
+
+      // 1: Pon 1, 2: Pon 2, 3: Toma 1, 4: Toma 2, 5: Toma Todo, 6: Todos Ponen
+      const resultado = Math.floor(Math.random() * 6) + 1; 
+      const angulos = { 1: 0, 2: -60, 3: -120, 4: -180, 5: -240, 6: -300 };
+      const rotacion = angulos[resultado] + (360 * 5); 
+
+      // Notificar giro
+      io.to(salaId).emit('resultado-giro', { cara: resultado, nuevaRotacion: rotacion });
+
+      // Esperar animación (3s) y aplicar reglas
+      setTimeout(async () => {
+          let mensaje = "";
+          const nombre = jugador.nickname;
+
+          try {
+              if (resultado === 1) { // PON 1
+                  mensaje = `${nombre} puso $1`;
+                  await cobrar(jugador, 1, sala);
+              } 
+              else if (resultado === 2) { // PON 2
+                  mensaje = `${nombre} puso $2`;
+                  await cobrar(jugador, 2, sala);
+              } 
+              else if (resultado === 3) { // TOMA 1
+                  mensaje = `${nombre} tomó $1`;
+                  pagar(jugador, 1, sala);
+              } 
+              else if (resultado === 4) { // TOMA 2
+                  mensaje = `${nombre} tomó $2`;
+                  pagar(jugador, 2, sala);
+              } 
+              else if (resultado === 5) { // TOMA TODO
+                  mensaje = `¡${nombre} SE LLEVÓ EL BOTE! 🎉`;
+                  const total = sala.bote;
+                  pagar(jugador, total, sala);
+                  io.to(salaId).emit('fin-juego-pirinola', { ganador: jugador.nickname, premio: total });
+                  delete salasPirinola[salaId]; // Fin del juego
+                  return; 
+              } 
+              else if (resultado === 6) { // TODOS PONEN
+                  mensaje = "¡TODOS PONEN $1!";
+                  for (let j of sala.jugadores) {
+                      await cobrar(j, 1, sala);
+                  }
+              }
+
+              // Siguiente turno
+              sala.turnoIndex = (sala.turnoIndex + 1) % sala.jugadores.length;
+              io.to(salaId).emit('actualizar-estado-pirinola', sala);
+              io.to(salaId).emit('notificacion', mensaje);
+
+              // Si sigue el bot
+              verificarTurnoBot(sala);
+
+          } catch (e) { console.error("Error lógica juego:", e); }
+
+      }, 3000);
+  }
+
+  function verificarTurnoBot(sala) {
+      const jugadorActual = sala.jugadores[sala.turnoIndex];
+      if (jugadorActual && jugadorActual.esBot) {
+          // El bot "piensa" 2 segundos y tira
+          setTimeout(() => {
+              procesarTurno(sala.id, 'sistema'); 
+          }, 2000);
+      }
+  }
+
+  // --- HELPERS FINANCIEROS (Manejan Bot vs Humano) ---
+  
+  async function cobrar(jugador, cantidad, sala) {
+      // Si es bot, solo "finge" poner dinero (la casa tiene fondos infinitos)
+      // Pero para el juego, el bote debe subir.
+      sala.bote += cantidad;
+      
+      // Si es humano, descontamos de su DB
+      if (!jugador.esBot) {
+          const userRef = db.collection('usuarios').doc(jugador.email);
+          await userRef.update({ monedas: admin.firestore.FieldValue.increment(-cantidad) });
+          // Opcional: Emitir actualización de saldo al socket individual
+      }
+  }
+
+  function pagar(jugador, cantidad, sala) {
+      const pago = Math.min(cantidad, sala.bote);
+      sala.bote -= pago;
+
+      // Si es humano, le damos el dinero en DB
+      if (!jugador.esBot) {
+          const userRef = db.collection('usuarios').doc(jugador.email);
+          userRef.update({ monedas: admin.firestore.FieldValue.increment(pago) });
+      }
+      // Si es bot, el dinero "desaparece" (la casa recupera)
+  }
+
   // =========================================================
   // 🐍 BLOQUE SERPIENTES Y ESCALERAS (INTEGRADO FINAL) 🐍
   // =========================================================
