@@ -841,23 +841,25 @@ io.on('connection', (socket) => {
           return;
       }
 
-      // Cobrar Entrada (Ante)
+      // 1. Cobrar Entrada (Ante)
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
-      await registrarMovimiento(email, 'apuesta', monto, 'Pirinola Royal', false);
+      await registrarMovimiento(email, 'apuesta', monto, 'Entrada Pirinola', false); // Rojo
+      
       const nuevoDoc = await userRef.get();
       socket.emit('usuario-actualizado', nuevoDoc.data());
 
       let salaId = null;
 
-      // Lógica de Matchmaking o Crear Sala
+      // 2. Matchmaking
       if (vsCpu) {
           salaId = `cpu_${socket.id}_${Date.now()}`;
           salasPirinola[salaId] = {
               id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, enJuego: false, esVsCpu: true
           };
       } else {
+          // Buscar mesa existente con espacio y SIN juego iniciado
           salaId = Object.keys(salasPirinola).find(id => 
-              !salasPirinola[id].esVsCpu && // No unir a salas de CPU
+              !salasPirinola[id].esVsCpu && 
               salasPirinola[id].apuesta === monto && 
               salasPirinola[id].jugadores.length < 6 && 
               !salasPirinola[id].enJuego
@@ -874,62 +876,67 @@ io.on('connection', (socket) => {
       const sala = salasPirinola[salaId];
       socket.join(salaId);
 
-      // Agregar HUMANO
-      sala.jugadores.push({ id: socket.id, email, nickname, esBot: false });
-      sala.bote += monto; // Pone su entrada
+      // 3. Agregar Jugador (Evitar duplicados de socket)
+      if(!sala.jugadores.some(j => j.id === socket.id)) {
+          sala.jugadores.push({ id: socket.id, email, nickname, esBot: false });
+          sala.bote += monto; 
+      }
 
-      // Si es Vs CPU, agregar al BOT y poner su entrada
-      if(vsCpu) {
+      // Agregar Bot si es necesario
+      if(vsCpu && !sala.jugadores.some(j => j.esBot)) {
           sala.jugadores.push({ id: 'bot_banca', email: 'banca', nickname: '🤖 La Banca', esBot: true });
-          sala.bote += monto; // La banca iguala la entrada
+          sala.bote += monto;
       }
 
       socket.emit('sala-encontrada', sala);
       io.to(salaId).emit('actualizar-estado-pirinola', sala);
 
-      // Iniciar Juego
-      const jugadoresNecesarios = vsCpu ? 2 : 2; // Minimo 2 para multi
+      // 4. Iniciar Juego (SOLO SI HAY 2 O MÁS)
+      const jugadoresNecesarios = 2; 
+      
       if (sala.jugadores.length >= jugadoresNecesarios && !sala.enJuego) {
           if(sala.timerInicio) clearTimeout(sala.timerInicio);
           
           const tiempoEspera = vsCpu ? 1000 : 3000;
+          io.to(salaId).emit('notificacion', vsCpu ? 'Iniciando...' : 'Jugadores listos. Iniciando...');
+
           sala.timerInicio = setTimeout(() => {
+              // DOBLE CHECK: ¿Siguen estando los jugadores?
+              if (sala.jugadores.length < jugadoresNecesarios) {
+                  io.to(salaId).emit('notificacion', 'Jugador salió. Esperando...');
+                  sala.enJuego = false; // Cancelar inicio
+                  return;
+              }
+
               sala.enJuego = true;
-              io.to(salaId).emit('notificacion', '¡Juego Iniciado!');
-              sala.turnoIndex = Math.floor(Math.random() * sala.jugadores.length); // Turno random
+              io.to(salaId).emit('notificacion', '¡Gira la Pirinola!');
+              sala.turnoIndex = Math.floor(Math.random() * sala.jugadores.length); 
               io.to(salaId).emit('actualizar-estado-pirinola', sala);
               
-              // Si le toca al bot iniciar
               verificarTurnoBot(sala);
 
           }, tiempoEspera);
       }
   });
 
-  // --- TIRAR PIRINOLA (Humano) ---
+  // --- TIRAR PIRINOLA ---
   socket.on('tirar-pirinola', (salaId) => {
       procesarTurnoPirinola(salaId, socket.id);
   });
 
-  // --- LÓGICA CENTRAL DE TURNOS PIRINOLA ---
+  // --- LÓGICA DE TURNOS ---
   function procesarTurnoPirinola(salaId, solicitanteId) {
       const sala = salasPirinola[salaId];
       if (!sala || !sala.enJuego) return;
 
       const jugador = sala.jugadores[sala.turnoIndex];
-      
-      // Validar que sea turno del que llama (o si es el sistema llamando al bot)
       if (solicitanteId !== 'sistema' && jugador.id !== solicitanteId) return;
 
-      // 1: Pon 1, 2: Pon 2, 3: Toma 1, 4: Toma 2, 5: Toma Todo, 6: Todos Ponen
       const resultado = Math.floor(Math.random() * 6) + 1; 
-      const angulos = { 1: 0, 2: -60, 3: -120, 4: -180, 5: -240, 6: -300 };
-      const rotacion = angulos[resultado] + (360 * 5); 
+      
+      io.to(salaId).emit('resultado-giro', { cara: resultado });
 
-      // Notificar giro
-      io.to(salaId).emit('resultado-giro', { cara: resultado, nuevaRotacion: rotacion });
-
-      // Esperar animación (3s) y aplicar reglas
+      // Esperar animación (4s)
       setTimeout(async () => {
           let mensaje = "";
           const nombre = jugador.nickname;
@@ -945,74 +952,71 @@ io.on('connection', (socket) => {
               } 
               else if (resultado === 3) { // TOMA 1
                   mensaje = `${nombre} tomó $1`;
-                  pagarPirinola(jugador, 1, sala);
+                  await pagarPirinola(jugador, 1, sala, 'Premio Toma 1');
               } 
               else if (resultado === 4) { // TOMA 2
                   mensaje = `${nombre} tomó $2`;
-                  pagarPirinola(jugador, 2, sala);
+                  await pagarPirinola(jugador, 2, sala, 'Premio Toma 2');
               } 
               else if (resultado === 5) { // TOMA TODO
                   mensaje = `¡${nombre} SE LLEVÓ EL BOTE! 🎉`;
                   const total = sala.bote;
-                  pagarPirinola(jugador, total, sala);
+                  await pagarPirinola(jugador, total, sala, 'Premio TOMA TODO');
+                  
                   io.to(salaId).emit('fin-juego-pirinola', { ganador: jugador.nickname, premio: total });
-                  delete salasPirinola[salaId]; // Fin del juego
+                  delete salasPirinola[salaId]; 
                   return; 
               } 
               else if (resultado === 6) { // TODOS PONEN
                   mensaje = "¡TODOS PONEN $1!";
                   for (let j of sala.jugadores) {
-                      await cobrarPirinola(j, 1, sala);
+                      await cobrarPirinola(j, 1, sala); // Todos ponen
                   }
               }
 
-              // Siguiente turno
               sala.turnoIndex = (sala.turnoIndex + 1) % sala.jugadores.length;
               io.to(salaId).emit('actualizar-estado-pirinola', sala);
               io.to(salaId).emit('notificacion', mensaje);
 
-              // Si sigue el bot
               verificarTurnoBot(sala);
 
           } catch (e) { console.error("Error lógica pirinola:", e); }
 
-      }, 3000);
+      }, 4000);
   }
 
   function verificarTurnoBot(sala) {
       const jugadorActual = sala.jugadores[sala.turnoIndex];
       if (jugadorActual && jugadorActual.esBot) {
-          // El bot "piensa" 2 segundos y tira
           setTimeout(() => {
               procesarTurnoPirinola(sala.id, 'sistema'); 
           }, 2000);
       }
   }
 
-  // --- HELPERS FINANCIEROS PIRINOLA (Manejan Bot vs Humano) ---
+  // --- HELPERS FINANCIEROS (CORREGIDOS) ---
   async function cobrarPirinola(jugador, cantidad, sala) {
       sala.bote += cantidad;
-      
-      // Si es humano, descontamos de su DB
       if (!jugador.esBot) {
           const userRef = db.collection('usuarios').doc(jugador.email);
           await userRef.update({ monedas: admin.firestore.FieldValue.increment(-cantidad) });
       }
   }
 
-  function pagarPirinola(jugador, cantidad, sala) {
+  async function pagarPirinola(jugador, cantidad, sala, concepto) {
       const pago = Math.min(cantidad, sala.bote);
       sala.bote -= pago;
 
-      // Si es humano, le damos el dinero en DB
-      if (!jugador.esBot) {
+      if (!jugador.esBot && pago > 0) {
           const userRef = db.collection('usuarios').doc(jugador.email);
-          userRef.update({ monedas: admin.firestore.FieldValue.increment(pago) });
+          await userRef.update({ monedas: admin.firestore.FieldValue.increment(pago) });
+          // AQUI ESTÁ EL FIX: Registro en VERDE (true) con concepto claro
+          await registrarMovimiento(jugador.email, 'victoria', pago, concepto || 'Ganancia Pirinola', true);
       }
   }
 
-  // ==================== DESCONEXIÓN GLOBAL UNIFICADA ====================
-  socket.on('disconnect', () => {
+  // ==================== DESCONEXIÓN GLOBAL UNIFICADA (CON REEMBOLSOS) ====================
+  socket.on('disconnect', async () => {
       console.log('Socket desconectado:', socket.id);
       
       // 1. Limpieza Lotería
@@ -1020,10 +1024,11 @@ io.on('connection', (socket) => {
           if(salas[salaId].jugadores[socket.id]) {
               const jugador = salas[salaId].jugadores[socket.id];
               if (!salas[salaId].juegoIniciado && jugador.apostado) {
-                  procesarReembolsoPorSalida(salaId, socket.id);
+                  await procesarReembolsoPorSalida(salaId, socket.id);
               }
               const eraHost = (salas[salaId].hostId === socket.id);
               delete salas[salaId].jugadores[socket.id];
+              
               if(Object.keys(salas[salaId].jugadores).length === 0) {
                   if(salas[salaId].intervaloCartas) clearInterval(salas[salaId].intervaloCartas);
                   delete salas[salaId];
@@ -1043,6 +1048,16 @@ io.on('connection', (socket) => {
           const sala = salasSerpientes[sId];
           const idx = sala.jugadores.findIndex(j => j.id === socket.id);
           if (idx !== -1) {
+              // Reembolso si sale antes de jugar en espera
+              const jugador = sala.jugadores[idx];
+              if (!sala.enJuego && !sala.esVsCpu) {
+                   try {
+                       const userRef = db.collection('usuarios').doc(jugador.email);
+                       await userRef.update({ monedas: admin.firestore.FieldValue.increment(sala.apuesta) });
+                       await registrarMovimiento(jugador.email, 'reembolso', sala.apuesta, 'Reembolso Serpientes (Desc)', true);
+                   } catch(e) { console.error(e); }
+              }
+
               sala.jugadores.splice(idx, 1);
               if (sala.jugadores.length === 0 || sala.esVsCpu) {
                   delete salasSerpientes[sId];
@@ -1052,17 +1067,35 @@ io.on('connection', (socket) => {
           }
       }
 
-      // 3. Limpieza Pirinola 🌀
+      // 3. Limpieza Pirinola (REEMBOLSO AUTOMÁTICO) 🌀
       for (const pId in salasPirinola) {
           const sala = salasPirinola[pId];
           const idx = sala.jugadores.findIndex(j => j.id === socket.id);
+          
           if (idx !== -1) {
+              const jugador = sala.jugadores[idx];
+
+              // REEMBOLSO: Si el juego NO ha iniciado y es humano
+              if (!sala.enJuego && !jugador.esBot) {
+                  try {
+                      const reembolso = sala.apuesta; 
+                      const userRef = db.collection('usuarios').doc(jugador.email);
+                      await userRef.update({ monedas: admin.firestore.FieldValue.increment(reembolso) });
+                      // REGISTRO EN VERDE DEL REEMBOLSO
+                      await registrarMovimiento(jugador.email, 'reembolso', reembolso, 'Reembolso Pirinola (Salida)', true);
+                      console.log(`Reembolso Pirinola a ${jugador.nickname}: $${reembolso}`);
+                  } catch(e) { console.error("Error reembolso pirinola:", e); }
+              }
+
               sala.jugadores.splice(idx, 1);
-              // Si queda vacío o es vs CPU, eliminar sala
-              if (sala.jugadores.length === 0 || sala.esVsCpu) {
+
+              // Si queda vacío o era Vs CPU y se fue el humano, borrar sala
+              if (sala.jugadores.filter(j => !j.esBot).length === 0) {
                   delete salasPirinola[pId];
               } else {
+                  // Avisar a los que quedan
                   io.to(pId).emit('actualizar-estado-pirinola', sala);
+                  io.to(pId).emit('notificacion', `${jugador.nickname} salió.`);
               }
           }
       }
