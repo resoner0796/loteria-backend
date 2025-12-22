@@ -1,4 +1,4 @@
-// server.js
+// server.js - Backend Lotería + Serpientes + Hub
 
 // ==================== CONFIG FIREBASE ====================
 const admin = require('firebase-admin');
@@ -45,11 +45,9 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 // ==================== VARIABLES GLOBALES ====================
-// Estado del juego por sala
 const salas = {}; // Lotería
 const salasSerpientes = {}; // Serpientes
 
-// Constantes de Serpientes
 const SNAKES = { 18:6, 25:9, 33:19, 41:24, 48:32, 53:13 };
 const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
 
@@ -95,7 +93,8 @@ app.post('/api/login', async (req, res) => {
             nickname: userData.nickname, 
             monedas: userData.monedas, 
             email: userData.email,
-            inventario: userData.inventario || [] // Agregado inventario para skins
+            avatar: userData.avatar, // Incluimos avatar
+            inventario: userData.inventario || [] 
         });
     } catch (error) {
         console.error("Error login:", error);
@@ -103,21 +102,48 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// OBTENER HISTORIAL DE MOVIMIENTOS
-app.get('/api/historial-usuario', async (req, res) => {
+// 3. DATOS FRESCOS (NUEVO endpoint para el Hub) 🔥
+app.get('/api/usuario/datos-frescos', async (req, res) => {
     const { email } = req.query;
-    if (!email) return res.json({ success: false, error: "Falta email" });
+    if (!email) return res.status(400).json({ error: "Falta email" });
+
     try {
-        const snapshot = await db.collection('usuarios').doc(email).collection('historial')
-            .orderBy('fecha', 'desc').limit(50).get();
-        const movimientos = snapshot.docs.map(doc => {
+        // 1. Obtener Saldo Real
+        const userDoc = await db.collection('usuarios').doc(email).get();
+        if (!userDoc.exists) return res.status(404).json({ error: "Usuario no encontrado" });
+        
+        const saldoActual = userDoc.data().monedas || 0;
+
+        // 2. Obtener Historial (Últimos 20)
+        const historialSnapshot = await db.collection('usuarios').doc(email).collection('historial')
+            .orderBy('fecha', 'desc')
+            .limit(20)
+            .get();
+
+        const historial = historialSnapshot.docs.map(doc => {
             const data = doc.data();
-            return { ...data, fecha: data.fecha ? data.fecha.toDate() : new Date() };
+            // Formatear fecha legible
+            const fechaObj = data.fecha ? data.fecha.toDate() : new Date();
+            const fechaStr = fechaObj.toLocaleDateString("es-MX") + ' ' + fechaObj.toLocaleTimeString("es-MX", {hour: '2-digit', minute:'2-digit'});
+            
+            return {
+                id: doc.id,
+                tipo: data.tipo,
+                monto: data.monto,
+                descripcion: data.descripcion,
+                esIngreso: data.esIngreso,
+                // Mapeamos para que coincida con el frontend
+                cantidad: data.monto,
+                concepto: data.descripcion,
+                fecha: fechaStr
+            };
         });
-        res.json({ success: true, movimientos });
-    } catch (e) {
-        console.error("Error obteniendo historial:", e);
-        res.status(500).json({ success: false, error: "Error servidor" });
+
+        res.json({ success: true, monedas: saldoActual, historial });
+
+    } catch (error) {
+        console.error("Error obteniendo datos frescos:", error);
+        res.status(500).json({ error: "Error de servidor" });
     }
 });
 
