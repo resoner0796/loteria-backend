@@ -93,7 +93,7 @@ app.post('/api/login', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error servidor.' }); }
 });
 
-// 3. DATOS FRESCOS
+// 3. DATOS FRESCOS (CON HORA CDMX)
 app.get('/api/usuario/datos-frescos', async (req, res) => {
     const { email } = req.query;
     if (!email) return res.status(400).json({ error: "Falta email" });
@@ -109,13 +109,25 @@ app.get('/api/usuario/datos-frescos', async (req, res) => {
 
         const historial = historialSnapshot.docs.map(doc => {
             const d = doc.data();
-            const f = d.fecha ? d.fecha.toDate() : new Date();
+            let fechaMX = "---";
+            
+            // CONVERSIÓN DE HORA UTC A CDMX
+            if (d.fecha) {
+                const fechaObj = d.fecha.toDate ? d.fecha.toDate() : new Date(d.fecha);
+                fechaMX = fechaObj.toLocaleString("es-MX", {
+                    timeZone: "America/Mexico_City",
+                    day: '2-digit', month: '2-digit', year: '2-digit',
+                    hour: '2-digit', minute: '2-digit', hour12: true
+                });
+            }
+
             return {
                 tipo: d.tipo, monto: d.monto, descripcion: d.descripcion, esIngreso: d.esIngreso,
                 cantidad: d.monto, concepto: d.descripcion,
-                fecha: f.toLocaleDateString("es-MX") + ' ' + f.toLocaleTimeString("es-MX", {hour:'2-digit', minute:'2-digit'})
+                fecha: fechaMX // Ahora envía "23/12/25 02:30 p.m." en hora local
             };
         });
+        
         res.json({ success: true, monedas: userDoc.data().monedas, historial });
     } catch (error) { res.status(500).json({ error: "Error servidor" }); }
 });
