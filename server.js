@@ -249,6 +249,143 @@ app.post('/api/admin/recargar-manual', async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Error saldo" }); }
 });
 
+// =========================================================
+// 💸 SISTEMA DE TRANSFERENCIAS Y BÚSQUEDA (NUEVO) 💸
+// =========================================================
+
+// 1. BUSCAR DESTINATARIO (Por Nickname)
+app.get('/api/buscar-destinatario', async (req, res) => {
+    const { nickname } = req.query;
+    if (!nickname) return res.status(400).json({ error: "Falta nickname" });
+
+    try {
+        // Buscamos en toda la colección de usuarios quien tiene ese nickname
+        const snapshot = await db.collection('usuarios').where('nickname', '==', nickname).limit(1).get();
+        
+        if (snapshot.empty) {
+            return res.json({ success: false, error: "Usuario no encontrado" });
+        }
+
+        const doc = snapshot.docs[0];
+        // Retornamos solo lo necesario (email y nickname) por seguridad
+        res.json({ 
+            success: true, 
+            destinatario: { 
+                email: doc.id, 
+                nickname: doc.data().nickname,
+                avatar: doc.data().avatar 
+            } 
+        });
+    } catch (e) {
+        console.error("Error buscar destinatario:", e);
+        res.status(500).json({ error: "Error de servidor" });
+    }
+});
+
+// 2. TRANSFERIR SALDO
+app.post('/api/transferir-saldo', async (req, res) => {
+    const { origenEmail, destinoEmail, cantidad } = req.body;
+    const monto = parseInt(cantidad);
+
+    if (!origenEmail || !destinoEmail || !monto || monto < 1) {
+        return res.status(400).json({ error: "Datos inválidos" });
+    }
+
+    if (origenEmail === destinoEmail) {
+        return res.status(400).json({ error: "No puedes enviarte a ti mismo" });
+    }
+
+    try {
+        await db.runTransaction(async (t) => {
+            const origenRef = db.collection('usuarios').doc(origenEmail);
+            const destinoRef = db.collection('usuarios').doc(destinoEmail);
+
+            const origenDoc = await t.get(origenRef);
+            const destinoDoc = await t.get(destinoRef);
+
+            if (!origenDoc.exists || !destinoDoc.exists) {
+                throw new Error("Usuario no encontrado");
+            }
+
+            const saldoActual = origenDoc.data().monedas || 0;
+            if (saldoActual < monto) {
+                throw new Error("Saldo insuficiente");
+            }
+
+            // Restar al origen
+            t.update(origenRef, { monedas: admin.firestore.FieldValue.increment(-monto) });
+            
+            // Sumar al destino
+            t.update(destinoRef, { monedas: admin.firestore.FieldValue.increment(monto) });
+
+            // Registrar Historial ORIGEN (Egreso)
+            const historialOrigenRef = origenRef.collection('historial').doc();
+            t.set(historialOrigenRef, {
+                tipo: 'transferencia',
+                monto: monto,
+                descripcion: `Envío a ${destinoDoc.data().nickname}`,
+                esIngreso: false,
+                fecha: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            // Registrar Historial DESTINO (Ingreso)
+            const historialDestinoRef = destinoRef.collection('historial').doc();
+            t.set(historialDestinoRef, {
+                tipo: 'transferencia',
+                monto: monto,
+                descripcion: `Recibido de ${origenDoc.data().nickname}`,
+                esIngreso: true,
+                fecha: admin.firestore.FieldValue.serverTimestamp()
+            });
+        });
+
+        res.json({ success: true });
+
+    } catch (e) {
+        console.error("Error transferencia:", e);
+        res.status(400).json({ success: false, error: e.message || "Error al transferir" });
+    }
+});
+
+// 3. HISTORIAL COMPLETO (Para el Modal de Historial)
+app.get('/api/historial-usuario', async (req, res) => {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ error: "Falta email" });
+
+    try {
+        const snapshot = await db.collection('usuarios').doc(email).collection('historial')
+            .orderBy('fecha', 'desc')
+            .limit(50) // Traemos los últimos 50
+            .get();
+
+        const movimientos = snapshot.docs.map(doc => {
+            const d = doc.data();
+            // Formatear fecha bonita
+            let fechaBonita = "---";
+            if (d.fecha && d.fecha.toDate) {
+                fechaBonita = d.fecha.toDate().toLocaleString("es-MX", {
+                    timeZone: "America/Mexico_City",
+                    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+                });
+            }
+
+            return {
+                id: doc.id,
+                tipo: d.tipo || 'varios',
+                monto: d.monto || 0,
+                descripcion: d.descripcion || 'Movimiento',
+                esIngreso: d.esIngreso,
+                fecha: fechaBonita
+            };
+        });
+
+        res.json({ success: true, movimientos });
+    } catch (e) {
+        console.error("Error historial:", e);
+        res.status(500).json({ error: "Error al obtener historial" });
+    }
+});
+
 // --- HUB & JUEGOS API ---
 app.get('/api/hub/juegos', async (req, res) => {
     try {
