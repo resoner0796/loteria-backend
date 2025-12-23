@@ -1,4 +1,4 @@
-// server.js - Backend Lotería + Serpientes + Pirinola + Hub
+// server.js - Backend Lotería + Serpientes + Pirinola + Hub + Admin Pro
 
 // ==================== CONFIG FIREBASE ====================
 const admin = require('firebase-admin');
@@ -51,6 +51,7 @@ const salasPirinola = {}; // Pirinola 🌀
 
 const SNAKES = { 18:6, 25:9, 33:19, 41:24, 48:32, 53:13 };
 const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
+const ADMIN_EMAIL = "admin@loteria.com"; 
 
 // ==================== RUTAS DE API ====================
 
@@ -68,7 +69,8 @@ app.post('/api/registro', async (req, res) => {
 
         const hashedPassword = await bcrypt.hash(password, 10);
         await userRef.set({
-            email, password: hashedPassword, nickname, monedas: 20, creado: new Date()
+            email, password: hashedPassword, nickname, monedas: 20, 
+            creado: new Date(), baneado: false 
         });
         res.json({ success: true, nickname, monedas: 20, email });
     } catch (error) {
@@ -77,7 +79,7 @@ app.post('/api/registro', async (req, res) => {
     }
 });
 
-// 2. LOGIN
+// 2. LOGIN (CON BAN CHECK)
 app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
     try {
@@ -86,6 +88,10 @@ app.post('/api/login', async (req, res) => {
         if (!doc.exists) return res.status(400).json({ error: 'Usuario no encontrado.' });
 
         const userData = doc.data();
+        
+        // CHECK BANEO
+        if (userData.baneado) return res.status(403).json({ error: '⛔ TU CUENTA ESTÁ SUSPENDIDA.' });
+
         const validPassword = await bcrypt.compare(password, userData.password);
         if (!validPassword) return res.status(400).json({ error: 'Contraseña incorrecta.' });
 
@@ -112,6 +118,9 @@ app.get('/api/usuario/datos-frescos', async (req, res) => {
         const userDoc = await db.collection('usuarios').doc(email).get();
         if (!userDoc.exists) return res.status(404).json({ error: "Usuario no encontrado" });
         
+        // Check Baneo en tiempo real
+        if (userDoc.data().baneado) return res.json({ success: false, baneado: true });
+
         const saldoActual = userDoc.data().monedas || 0;
 
         const historialSnapshot = await db.collection('usuarios').doc(email).collection('historial')
@@ -144,93 +153,102 @@ app.get('/api/usuario/datos-frescos', async (req, res) => {
     }
 });
 
-// BUSCAR USUARIO
-app.get('/api/buscar-destinatario', async (req, res) => {
-    const { nickname } = req.query;
-    if (!nickname) return res.json({ success: false, error: "Falta nickname" });
+// --- ADMIN DASHBOARD API (NUEVO) ---
+
+// Stats Generales
+app.get('/api/admin/stats', async (req, res) => {
+    const solicitante = req.headers['admin-email'];
+    if (solicitante !== ADMIN_EMAIL) return res.status(403).json({ error: "Acceso denegado" });
+
     try {
-        const snapshot = await db.collection('usuarios').where('nickname', '==', nickname).limit(1).get();
-        if (snapshot.empty) return res.json({ success: false, error: "Usuario no encontrado" });
-        const doc = snapshot.docs[0];
-        return res.json({ 
-            success: true, 
-            destinatario: { email: doc.id, nickname: doc.data().nickname } 
+        const usersSnap = await db.collection('usuarios').get();
+        let totalUsuarios = 0;
+        let monedasCirculantes = 0;
+
+        usersSnap.forEach(doc => {
+            totalUsuarios++;
+            monedasCirculantes += (doc.data().monedas || 0);
         });
-    } catch (error) {
-        console.error("Error buscando usuario:", error);
-        res.status(500).json({ success: false, error: "Error en servidor" });
-    }
+
+        res.json({ totalUsuarios, monedasCirculantes });
+    } catch (e) { res.status(500).json({ error: "Error stats" }); }
 });
 
-// TRANSFERENCIA
-app.post('/api/transferir-saldo', async (req, res) => {
-    const { origenEmail, destinoEmail, cantidad } = req.body;
-    const monto = parseInt(cantidad);
-    if (!origenEmail || !destinoEmail || monto <= 0) return res.json({ success: false, error: "Datos inválidos" });
-
+// Lista de Usuarios
+app.get('/api/admin/usuarios', async (req, res) => {
+    const solicitante = req.headers['admin-email'];
+    if (solicitante !== ADMIN_EMAIL) return res.status(403).json({ error: "Acceso denegado" });
     try {
-        await db.runTransaction(async (t) => {
-            const origenRef = db.collection('usuarios').doc(origenEmail);
-            const destinoRef = db.collection('usuarios').doc(destinoEmail);
-            const docOrigen = await t.get(origenRef);
-            const docDestino = await t.get(destinoRef);
+        const snapshot = await db.collection('usuarios').get();
+        const usuarios = snapshot.docs.map(doc => ({
+            email: doc.id,
+            nickname: doc.data().nickname,
+            monedas: doc.data().monedas,
+            baneado: doc.data().baneado || false
+        }));
+        res.json(usuarios);
+    } catch (error) { res.status(500).json({ error: "Error usuarios" }); }
+});
 
-            if (!docOrigen.exists || !docDestino.exists) throw "Uno de los usuarios no existe";
-            if (docOrigen.data().monedas < monto) throw "Saldo insuficiente";
-
-            t.update(origenRef, { monedas: admin.firestore.FieldValue.increment(-monto) });
-            t.update(destinoRef, { monedas: admin.firestore.FieldValue.increment(monto) });
-        });
-
-        const destinoRef = db.collection('usuarios').doc(destinoEmail);
-        const origenRef = db.collection('usuarios').doc(origenEmail);
-        const docDestino = await destinoRef.get();
-        const docOrigen = await origenRef.get();
-
-        await registrarMovimiento(origenEmail, 'transferencia', monto, `Envío a ${docDestino.data().nickname}`, false);
-        await registrarMovimiento(destinoEmail, 'transferencia', monto, `Recibido de ${docOrigen.data().nickname}`, true);
-
+// Banear / Desbanear
+app.post('/api/admin/banear', async (req, res) => {
+    const { adminEmail, targetEmail, ban } = req.body; 
+    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Acceso denegado" });
+    try {
+        await db.collection('usuarios').doc(targetEmail).update({ baneado: ban });
         res.json({ success: true });
-    } catch (e) {
-        console.error("Error transferencia:", e);
-        res.json({ success: false, error: e.toString() });
-    }
+    } catch (e) { res.status(500).json({ error: "Error ban" }); }
 });
 
-// ==================== FUNCIONES AUXILIARES ====================
-
-function mezclarBaraja() {
-  const cartas = Array.from({ length: 54 }, (_, i) => String(i + 1).padStart(2, '0'));
-  return cartas.sort(() => Math.random() - 0.5);
-}
-
-function repartirCartas(sala) {
-  const salaInfo = salas[sala];
-  if (!salaInfo || !salaInfo.juegoIniciado) return;
-  if (salaInfo.intervaloCartas) clearInterval(salaInfo.intervaloCartas);
-  const velocidad = salaInfo.velocidad || 3000;
-
-  salaInfo.intervaloCartas = setInterval(() => {
-    if (!salaInfo.juegoIniciado || salaInfo.baraja.length === 0) {
-      clearInterval(salaInfo.intervaloCartas);
-      salaInfo.intervaloCartas = null;
-      return;
-    }
-    const carta = salaInfo.baraja.shift();
-    salaInfo.historial.push(carta);
-    io.to(sala).emit('carta-cantada', carta);
-  }, velocidad); 
-}
-
-async function actualizarSaldoUsuario(jugador) {
+// Editar Saldo
+app.post('/api/admin/editar-saldo', async (req, res) => {
+    const { adminEmail, targetEmail, nuevoSaldo } = req.body;
+    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Acceso denegado" });
     try {
-        if (jugador.email) {
-            await db.collection('usuarios').doc(jugador.email).update({ monedas: jugador.monedas });
-        } else {
-            await db.collection('jugadores').doc(jugador.nickname).set({ monedas: jugador.monedas }, { merge: true });
-        }
-    } catch (error) { console.error("❌ Error al guardar saldo:", error); }
-}
+        await db.collection('usuarios').doc(targetEmail).update({ monedas: parseInt(nuevoSaldo) });
+        await registrarMovimiento(targetEmail, 'ajuste_admin', 0, `Ajuste Admin a: ${nuevoSaldo}`, true);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: "Error saldo" }); }
+});
+
+// --- HUB API ---
+app.get('/api/hub/juegos', async (req, res) => {
+    try {
+        const snapshot = await db.collection('juegos_hub').get();
+        const juegos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        res.json({ success: true, juegos });
+    } catch (error) { res.status(500).json({ error: "Error al cargar juegos" }); }
+});
+
+app.post('/api/hub/nuevo-juego', async (req, res) => {
+    const { adminEmail, titulo, url, imgPoster, descripcion, estado } = req.body;
+    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Sin permiso" });
+    try {
+        await db.collection('juegos_hub').add({
+            titulo, url, imgPoster, descripcion, estado, creado: admin.firestore.FieldValue.serverTimestamp()
+        });
+        res.json({ success: true });
+    } catch (error) { res.status(500).json({ error: "Error al guardar juego" }); }
+});
+
+app.delete('/api/hub/eliminar-juego/:id', async (req, res) => {
+    const { id } = req.params;
+    const adminEmail = req.headers['admin-email'];
+    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Sin permiso" });
+    try {
+        await db.collection('juegos_hub').doc(id).delete();
+        res.json({ success: true });
+    } catch (error) { res.status(500).json({ error: "Error al eliminar" }); }
+});
+
+app.post('/api/actualizar-perfil', async (req, res) => {
+    const { email, nickname, avatar } = req.body;
+    if (!email || !nickname) return res.status(400).json({ error: "Faltan datos" });
+    try {
+        await db.collection('usuarios').doc(email).update({ nickname: nickname, avatar: avatar || 'assets/avatar.png' });
+        res.json({ success: true });
+    } catch (error) { res.status(500).json({ error: "Error al actualizar perfil" }); }
+});
 
 // ==================== PAGOS STRIPE ====================
 
@@ -287,6 +305,7 @@ app.get('/api/confirmar-pago', async (req, res) => {
     } catch (error) { res.redirect(`${FRONTEND_HUB}/index.html?pago=error`); }
 });
 
+// FUNCIONES DE JUEGO (REEMBOLSOS)
 async function procesarReembolsoPorSalida(salaId, socketId) {
     const sala = salas[salaId];
     if (!sala) return;
@@ -308,80 +327,64 @@ async function procesarReembolsoPorSalida(salaId, socketId) {
     }
 }
 
-// ==================== PANEL ADMIN & HUB ====================
-const ADMIN_EMAIL = "admin@loteria.com"; 
+// FUNCIONES AUXILIARES LOTERÍA
+function mezclarBaraja() {
+  const cartas = Array.from({ length: 54 }, (_, i) => String(i + 1).padStart(2, '0'));
+  return cartas.sort(() => Math.random() - 0.5);
+}
 
-app.get('/api/admin/usuarios', async (req, res) => {
-    const solicitante = req.headers['admin-email'];
-    if (solicitante !== ADMIN_EMAIL) return res.status(403).json({ error: "Sin permiso." });
+function repartirCartas(sala) {
+  const salaInfo = salas[sala];
+  if (!salaInfo || !salaInfo.juegoIniciado) return;
+  if (salaInfo.intervaloCartas) clearInterval(salaInfo.intervaloCartas);
+  const velocidad = salaInfo.velocidad || 3000;
+
+  salaInfo.intervaloCartas = setInterval(() => {
+    if (!salaInfo.juegoIniciado || salaInfo.baraja.length === 0) {
+      clearInterval(salaInfo.intervaloCartas);
+      salaInfo.intervaloCartas = null;
+      return;
+    }
+    const carta = salaInfo.baraja.shift();
+    salaInfo.historial.push(carta);
+    io.to(sala).emit('carta-cantada', carta);
+  }, velocidad); 
+}
+
+async function actualizarSaldoUsuario(jugador) {
     try {
-        const snapshot = await db.collection('usuarios').get();
-        const usuarios = [];
-        snapshot.forEach(doc => {
-            const data = doc.data();
-            usuarios.push({ email: data.email, nickname: data.nickname, monedas: data.monedas });
-        });
-        res.json(usuarios);
-    } catch (error) { res.status(500).json({ error: "Error de servidor" }); }
-});
-
-app.post('/api/admin/recargar-manual', async (req, res) => {
-    const { adminEmail, targetEmail, cantidad } = req.body;
-    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Acceso denegado." });
-    try {
-        const userRef = db.collection('usuarios').doc(targetEmail);
-        const doc = await userRef.get();
-        if (!doc.exists) return res.status(404).json({ error: "Usuario no encontrado." });
-        const nuevasMonedas = (doc.data().monedas || 0) + parseInt(cantidad);
-        await userRef.update({ monedas: nuevasMonedas });
-        await registrarMovimiento(targetEmail, 'recarga', cantidad, 'Recarga Admin', true);
-        res.json({ success: true, nuevoSaldo: nuevasMonedas });
-    } catch (error) { res.status(500).json({ error: "Error en recarga." }); }
-});
-
-app.get('/api/hub/juegos', async (req, res) => {
-    try {
-        const snapshot = await db.collection('juegos_hub').get();
-        const juegos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        res.json({ success: true, juegos });
-    } catch (error) { res.status(500).json({ error: "Error al cargar juegos" }); }
-});
-
-app.post('/api/hub/nuevo-juego', async (req, res) => {
-    const { adminEmail, titulo, url, imgPoster, descripcion, estado } = req.body;
-    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Sin permiso" });
-    try {
-        await db.collection('juegos_hub').add({
-            titulo, url, imgPoster, descripcion, estado, creado: admin.firestore.FieldValue.serverTimestamp()
-        });
-        res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: "Error al guardar juego" }); }
-});
-
-app.delete('/api/hub/eliminar-juego/:id', async (req, res) => {
-    const { id } = req.params;
-    const adminEmail = req.headers['admin-email'];
-    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Sin permiso" });
-    try {
-        await db.collection('juegos_hub').doc(id).delete();
-        res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: "Error al eliminar" }); }
-});
-
-app.post('/api/actualizar-perfil', async (req, res) => {
-    const { email, nickname, avatar } = req.body;
-    if (!email || !nickname) return res.status(400).json({ error: "Faltan datos" });
-    try {
-        await db.collection('usuarios').doc(email).update({ nickname: nickname, avatar: avatar || 'assets/avatar.png' });
-        res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: "Error al actualizar perfil" }); }
-});
+        if (jugador.email) {
+            await db.collection('usuarios').doc(jugador.email).update({ monedas: jugador.monedas });
+        } else {
+            await db.collection('jugadores').doc(jugador.nickname).set({ monedas: jugador.monedas }, { merge: true });
+        }
+    } catch (error) { console.error("❌ Error al guardar saldo:", error); }
+}
 
 
-// ==================== SOCKET.IO (LÓGICA REAL TIME) ====================
+// ==================== SOCKET.IO & CONTADORES EN VIVO ====================
+
+function emitirContadores() {
+    let loteriaCount = 0;
+    for (let s in salas) loteriaCount += Object.keys(salas[s].jugadores).length;
+    
+    let serpientesCount = 0;
+    for (let s in salasSerpientes) serpientesCount += salasSerpientes[s].jugadores.filter(j => !j.esBot).length;
+
+    let pirinolaCount = 0;
+    for (let s in salasPirinola) pirinolaCount += salasPirinola[s].jugadores.filter(j => !j.esBot).length;
+
+    io.emit('actualizar-contadores', {
+        loteria: loteriaCount,
+        serpientes: serpientesCount,
+        pirinola: pirinolaCount,
+        total: loteriaCount + serpientesCount + pirinolaCount
+    });
+}
 
 io.on('connection', (socket) => {
-  console.log('Nuevo socket conectado:', socket.id);
+  console.log('Cliente conectado:', socket.id);
+  emitirContadores();
 
   // --- GENERAL ---
   socket.on('solicitar-info-usuario', async (email) => {
@@ -424,6 +427,7 @@ io.on('connection', (socket) => {
     io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
     io.to(sala).emit('bote-actualizado', salas[sala].bote);
     io.to(sala).emit('historial-actualizado', salas[sala].historial);
+    emitirContadores();
   });
 
   socket.on('seleccionar-carta', ({ carta, sala }) => {
@@ -620,6 +624,7 @@ io.on('connection', (socket) => {
             io.to(sala).emit('bote-actualizado', salas[sala].bote);
         }
     }
+    emitirContadores();
   });
 
   socket.on("enviar-efecto-sonido", ({ sala, soundId, emisor }) => {
@@ -627,7 +632,7 @@ io.on('connection', (socket) => {
   });
 
   // =========================================================
-  // 🐍 BLOQUE SERPIENTES Y ESCALERAS 🐍
+  // 🐍 BLOQUE SERPIENTES Y ESCALERAS (INTEGRADO FINAL) 🐍
   // =========================================================
 
   // --- TIENDA DE SKINS ---
@@ -721,6 +726,7 @@ io.on('connection', (socket) => {
 
       socket.emit('sala-conectada', { salaId: salaId, jugadoresConectados: sala.jugadores.length });
       io.to(salaId).emit('jugador-entro', sala.jugadores.length);
+      emitirContadores();
 
       // Iniciar juego
       const listosParaIniciar = sala.esVsCpu || (sala.jugadores.length >= 2);
@@ -772,6 +778,7 @@ io.on('connection', (socket) => {
               }
           }
       }
+      emitirContadores();
   });
 
   // --- JUEGO SERPIENTES (DADOS) ---
@@ -824,6 +831,7 @@ io.on('connection', (socket) => {
       }
       io.to(sala.id).emit('fin-juego-serpientes', { ganador: ganador.nickname, premio });
       delete salasSerpientes[sala.id];
+      emitirContadores();
   }
 
   // =========================================================
@@ -841,23 +849,21 @@ io.on('connection', (socket) => {
           return;
       }
 
-      // 1. Cobrar Entrada (Ante)
+      // Cobrar Entrada (Ante)
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
-      await registrarMovimiento(email, 'apuesta', monto, 'Entrada Pirinola', false); // Rojo
-      
+      await registrarMovimiento(email, 'apuesta', monto, 'Pirinola Royal', false);
       const nuevoDoc = await userRef.get();
       socket.emit('usuario-actualizado', nuevoDoc.data());
 
       let salaId = null;
 
-      // 2. Matchmaking
+      // Matchmaking
       if (vsCpu) {
           salaId = `cpu_${socket.id}_${Date.now()}`;
           salasPirinola[salaId] = {
               id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, enJuego: false, esVsCpu: true
           };
       } else {
-          // Buscar mesa existente con espacio y SIN juego iniciado
           salaId = Object.keys(salasPirinola).find(id => 
               !salasPirinola[id].esVsCpu && 
               salasPirinola[id].apuesta === monto && 
@@ -876,7 +882,7 @@ io.on('connection', (socket) => {
       const sala = salasPirinola[salaId];
       socket.join(salaId);
 
-      // 3. Agregar Jugador (Evitar duplicados de socket)
+      // Agregar HUMANO
       if(!sala.jugadores.some(j => j.id === socket.id)) {
           sala.jugadores.push({ id: socket.id, email, nickname, esBot: false });
           sala.bote += monto; 
@@ -890,8 +896,9 @@ io.on('connection', (socket) => {
 
       socket.emit('sala-encontrada', sala);
       io.to(salaId).emit('actualizar-estado-pirinola', sala);
+      emitirContadores();
 
-      // 4. Iniciar Juego (SOLO SI HAY 2 O MÁS)
+      // Iniciar Juego (SOLO SI HAY 2 O MÁS)
       const jugadoresNecesarios = 2; 
       
       if (sala.jugadores.length >= jugadoresNecesarios && !sala.enJuego) {
@@ -901,10 +908,9 @@ io.on('connection', (socket) => {
           io.to(salaId).emit('notificacion', vsCpu ? 'Iniciando...' : 'Jugadores listos. Iniciando...');
 
           sala.timerInicio = setTimeout(() => {
-              // DOBLE CHECK: ¿Siguen estando los jugadores?
               if (sala.jugadores.length < jugadoresNecesarios) {
                   io.to(salaId).emit('notificacion', 'Jugador salió. Esperando...');
-                  sala.enJuego = false; // Cancelar inicio
+                  sala.enJuego = false;
                   return;
               }
 
@@ -924,7 +930,7 @@ io.on('connection', (socket) => {
       procesarTurnoPirinola(salaId, socket.id);
   });
 
-  // --- LÓGICA DE TURNOS ---
+  // --- LÓGICA TURNOS (3.2s) ---
   function procesarTurnoPirinola(salaId, solicitanteId) {
       const sala = salasPirinola[salaId];
       if (!sala || !sala.enJuego) return;
@@ -936,7 +942,6 @@ io.on('connection', (socket) => {
       
       io.to(salaId).emit('resultado-giro', { cara: resultado });
 
-      // Esperar animación (4s)
       setTimeout(async () => {
           let mensaje = "";
           const nombre = jugador.nickname;
@@ -965,12 +970,13 @@ io.on('connection', (socket) => {
                   
                   io.to(salaId).emit('fin-juego-pirinola', { ganador: jugador.nickname, premio: total });
                   delete salasPirinola[salaId]; 
+                  emitirContadores();
                   return; 
               } 
               else if (resultado === 6) { // TODOS PONEN
                   mensaje = "¡TODOS PONEN $1!";
                   for (let j of sala.jugadores) {
-                      await cobrarPirinola(j, 1, sala); // Todos ponen
+                      await cobrarPirinola(j, 1, sala); 
                   }
               }
 
@@ -994,7 +1000,7 @@ io.on('connection', (socket) => {
       }
   }
 
-  // --- HELPERS FINANCIEROS (CORREGIDOS) ---
+  // --- HELPERS FINANCIEROS PIRINOLA ---
   async function cobrarPirinola(jugador, cantidad, sala) {
       sala.bote += cantidad;
       if (!jugador.esBot) {
@@ -1010,12 +1016,12 @@ io.on('connection', (socket) => {
       if (!jugador.esBot && pago > 0) {
           const userRef = db.collection('usuarios').doc(jugador.email);
           await userRef.update({ monedas: admin.firestore.FieldValue.increment(pago) });
-          // AQUI ESTÁ EL FIX: Registro en VERDE (true) con concepto claro
+          // Registro en VERDE
           await registrarMovimiento(jugador.email, 'victoria', pago, concepto || 'Ganancia Pirinola', true);
       }
   }
 
-  // ==================== DESCONEXIÓN GLOBAL UNIFICADA (CON REEMBOLSOS) ====================
+  // ==================== DESCONEXIÓN GLOBAL (CON REEMBOLSOS) ====================
   socket.on('disconnect', async () => {
       console.log('Socket desconectado:', socket.id);
       
@@ -1048,13 +1054,12 @@ io.on('connection', (socket) => {
           const sala = salasSerpientes[sId];
           const idx = sala.jugadores.findIndex(j => j.id === socket.id);
           if (idx !== -1) {
-              // Reembolso si sale antes de jugar en espera
               const jugador = sala.jugadores[idx];
               if (!sala.enJuego && !sala.esVsCpu) {
                    try {
                        const userRef = db.collection('usuarios').doc(jugador.email);
                        await userRef.update({ monedas: admin.firestore.FieldValue.increment(sala.apuesta) });
-                       await registrarMovimiento(jugador.email, 'reembolso', sala.apuesta, 'Reembolso Serpientes (Desc)', true);
+                       await registrarMovimiento(jugador.email, 'reembolso', sala.apuesta, 'Reembolso Serpientes', true);
                    } catch(e) { console.error(e); }
               }
 
@@ -1067,7 +1072,7 @@ io.on('connection', (socket) => {
           }
       }
 
-      // 3. Limpieza Pirinola (REEMBOLSO AUTOMÁTICO) 🌀
+      // 3. Limpieza Pirinola (REEMBOLSO) 🌀
       for (const pId in salasPirinola) {
           const sala = salasPirinola[pId];
           const idx = sala.jugadores.findIndex(j => j.id === socket.id);
@@ -1075,33 +1080,30 @@ io.on('connection', (socket) => {
           if (idx !== -1) {
               const jugador = sala.jugadores[idx];
 
-              // REEMBOLSO: Si el juego NO ha iniciado y es humano
               if (!sala.enJuego && !jugador.esBot) {
                   try {
                       const reembolso = sala.apuesta; 
                       const userRef = db.collection('usuarios').doc(jugador.email);
                       await userRef.update({ monedas: admin.firestore.FieldValue.increment(reembolso) });
-                      // REGISTRO EN VERDE DEL REEMBOLSO
-                      await registrarMovimiento(jugador.email, 'reembolso', reembolso, 'Reembolso Pirinola (Salida)', true);
-                      console.log(`Reembolso Pirinola a ${jugador.nickname}: $${reembolso}`);
+                      await registrarMovimiento(jugador.email, 'reembolso', reembolso, 'Reembolso Pirinola', true);
                   } catch(e) { console.error("Error reembolso pirinola:", e); }
               }
 
               sala.jugadores.splice(idx, 1);
 
-              // Si queda vacío o era Vs CPU y se fue el humano, borrar sala
               if (sala.jugadores.filter(j => !j.esBot).length === 0) {
                   delete salasPirinola[pId];
               } else {
-                  // Avisar a los que quedan
                   io.to(pId).emit('actualizar-estado-pirinola', sala);
                   io.to(pId).emit('notificacion', `${jugador.nickname} salió.`);
               }
           }
       }
+      
+      emitirContadores();
   });
 
-}); // FIN DE IO.ON (IMPORTANTE)
+}); // FIN DE IO.ON
 
 http.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
