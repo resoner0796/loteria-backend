@@ -122,7 +122,7 @@ app.get('/api/usuario/datos-frescos', async (req, res) => {
 
 // --- ADMIN DASHBOARD API ---
 
-// Stats Generales (VENTAS REALES)
+// Stats Generales (VENTAS REALES vs DEUDA)
 app.get('/api/admin/stats', async (req, res) => {
     const solicitante = req.headers['admin-email'];
     if (solicitante !== ADMIN_EMAIL) return res.status(403).json({ error: "Acceso denegado" });
@@ -137,7 +137,7 @@ app.get('/api/admin/stats', async (req, res) => {
             monedasCirculantes += (doc.data().monedas || 0);
         });
 
-        // Obtener ventas reales (Activo)
+        // Obtener ventas reales (Activo - MXN)
         const finanzasDoc = await db.collection('finanzas').doc('general').get();
         let ventasTotales = 0;
         if(finanzasDoc.exists) {
@@ -166,7 +166,7 @@ app.get('/api/admin/usuarios', async (req, res) => {
 
 // Banear / Desbanear
 app.post('/api/admin/banear', async (req, res) => {
-    const { adminEmail, targetEmail, ban } = req.body; // ban: true/false
+    const { adminEmail, targetEmail, ban } = req.body; 
     if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Acceso denegado" });
     try {
         await db.collection('usuarios').doc(targetEmail).update({ baneado: ban });
@@ -268,7 +268,7 @@ app.get('/api/confirmar-pago', async (req, res) => {
                 await userRef.update({ monedas: (doc.data().monedas || 0) + monedasExtra });
                 await registrarMovimiento(email, 'recarga', monedasExtra, 'Recarga con Tarjeta', true);
                 
-                // REGISTRAR VENTA REAL
+                // REGISTRAR VENTA REAL (NUEVO)
                 const finanzasRef = db.collection('finanzas').doc('general');
                 await finanzasRef.set({ 
                     totalVentasMXN: admin.firestore.FieldValue.increment(dineroReal),
@@ -837,6 +837,7 @@ io.on('connection', (socket) => {
       if (!jugador.esBot && pago > 0) {
           const userRef = db.collection('usuarios').doc(jugador.email);
           await userRef.update({ monedas: admin.firestore.FieldValue.increment(pago) });
+          // AQUÍ ESTÁ LA MAGIA VERDE
           await registrarMovimiento(jugador.email, 'victoria', pago, concepto || 'Ganancia Pirinola', true);
       }
   }
