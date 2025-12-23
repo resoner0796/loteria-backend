@@ -525,7 +525,14 @@ async function procesarReembolsoPorSalida(salaId, socketId) {
     }
 }
 
-// FUNCIONES AUXILIARES LOTERÍA
+// ==================== CONFIGURACIÓN DE MODOS ====================
+const MODOS_JUEGO = {
+    'tradicional': { costo: 1, cartasJugador: 54 },
+    'llena':       { costo: 2, cartasJugador: 54 },
+    'pozo':        { costo: 2, cartasJugador: 20 } 
+};
+
+// Función baraja SIEMPRE 54 (No importa el modo)
 function mezclarBaraja() {
   const cartas = Array.from({ length: 54 }, (_, i) => String(i + 1).padStart(2, '0'));
   return cartas.sort(() => Math.random() - 0.5);
@@ -591,23 +598,50 @@ io.on('connection', (socket) => {
   // --- LOTERIA ---
   socket.on('unirse-sala', async ({ nickname, email, sala, modo }) => { 
     socket.join(sala);
+    
+    // Configuración Inicial de la Sala
     if (!salas[sala]) {
+      const modoSeleccionado = modo || 'tradicional';
+      const config = MODOS_JUEGO[modoSeleccionado];
+      
       salas[sala] = {
-        jugadores: {}, baraja: [], historial: [], juegoIniciado: false, bote: 0,
-        hostId: socket.id, intervaloCartas: null, modoJuego: modo || 'clasico', 
-        reclamantes: [], validandoEmpate: false, timerEmpate: null
+        jugadores: {}, 
+        baraja: [], 
+        historial: [], 
+        juegoIniciado: false, 
+        bote: 0,
+        hostId: socket.id, 
+        intervaloCartas: null, 
+        
+        // GUARDAMOS DATOS DEL MODO
+        modoJuego: modoSeleccionado,
+        costoCarta: config.costo, 
+        
+        reclamantes: [], 
+        validandoEmpate: false, 
+        timerEmpate: null
       };
       socket.emit('rol-asignado', { host: true });
     } else {
       socket.emit('rol-asignado', { host: (socket.id === salas[sala].hostId) });
     }
+
     let monedasIniciales = 20;
     if(email) {
         const d = await db.collection('usuarios').doc(email).get();
         if(d.exists) monedasIniciales = d.data().monedas;
     }
-    salas[sala].jugadores[socket.id] = { nickname, email, monedas: monedasIniciales, apostado: false, cartas: [], id: socket.id, host: (socket.id === salas[sala].hostId) };
-    io.to(sala).emit('info-sala', { modo: salas[sala].modoJuego });
+
+    salas[sala].jugadores[socket.id] = { 
+        nickname, email, monedas: monedasIniciales, apostado: false, cartas: [], id: socket.id, host: (socket.id === salas[sala].hostId) 
+    };
+
+    // LE DECIMOS AL CLIENTE QUÉ MODO ES (Para que cargue las imágenes correctas)
+    io.to(sala).emit('info-sala', { 
+        modo: salas[sala].modoJuego,
+        costo: salas[sala].costoCarta
+    });
+
     const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
     io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
     io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
@@ -690,19 +724,24 @@ io.on('connection', (socket) => {
 
   socket.on('apostar', async (data) => {
     const sala = data.sala;
-    const cantidad = data.cantidad || 1;
     const email = data.email;
+    
     if (salas[sala] && !salas[sala].juegoIniciado) {
+        // COBRAMOS LO QUE DIGA LA SALA
+        const costoReal = salas[sala].costoCarta || 1; 
+        
         const jugador = salas[sala].jugadores[socket.id];
-        if (jugador && !jugador.apostado && jugador.monedas >= cantidad) {
-            jugador.monedas -= cantidad;
+        if (jugador && !jugador.apostado && jugador.monedas >= costoReal) {
+            jugador.monedas -= costoReal;
             jugador.apostado = true;
-            jugador.cantidadApostada = cantidad;
-            salas[sala].bote += cantidad;
+            jugador.cantidadApostada = costoReal;
+            salas[sala].bote += costoReal;
+            
             if (email) {
                 await db.collection('usuarios').doc(email).update({ monedas: jugador.monedas });
-                await registrarMovimiento(email, 'apuesta', cantidad, `Apuesta Lotería: ${sala}`, false);
+                await registrarMovimiento(email, 'apuesta', costoReal, `Apuesta ${salas[sala].modoJuego}`, false);
             }
+            
             io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
             io.to(sala).emit('bote-actualizado', salas[sala].bote);
             io.to(sala).emit("reproducir-sonido-apuesta");
