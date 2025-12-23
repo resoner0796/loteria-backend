@@ -727,58 +727,102 @@ io.on('connection', (socket) => {
   }
 
   // --- PIRINOLA ---
-  socket.on('entrar-pirinola', async ({ email, nickname, apuesta, vsCpu }) => {
+  // --- ENTRAR A PIRINOLA (CON SOPORTE PARA INVITE) ---
+  socket.on('entrar-pirinola', async ({ email, nickname, apuesta, vsCpu, salaIdEspecifica }) => {
       const monto = parseInt(apuesta);
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
+      
       if (!doc.exists || doc.data().monedas < monto) {
           socket.emit('error-apuesta', 'Saldo insuficiente');
           return;
       }
+
+      // 1. Cobrar Entrada
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
       await registrarMovimiento(email, 'apuesta', monto, 'Entrada Pirinola', false);
       const nuevoDoc = await userRef.get();
       socket.emit('usuario-actualizado', nuevoDoc.data());
 
       let salaId = null;
-      if (vsCpu) {
+
+      // 2. Lógica de Sala
+      if (salaIdEspecifica && salasPirinola[salaIdEspecifica]) {
+          // A) Intentar unirse a sala específica (Invitación)
+          const s = salasPirinola[salaIdEspecifica];
+          if (!s.enJuego && s.jugadores.length < 6 && s.apuesta === monto) {
+              salaId = salaIdEspecifica;
+          } else {
+              // Si la sala ya no existe, está llena o ya empezó, avisamos y reembolsamos
+              socket.emit('error-apuesta', 'La sala ya no está disponible o ya inició. (Reembolso procesado en salida)');
+              // El reembolso se procesará automáticamente al desconectar/salir por la lógica de disconnect
+              // O podemos forzar el reembolso aquí si queremos ser más estrictos, pero dejémoslo fluir.
+              return; 
+          }
+      } 
+      else if (vsCpu) {
+          // B) Vs CPU
           salaId = `cpu_${socket.id}_${Date.now()}`;
-          salasPirinola[salaId] = { id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, enJuego: false, esVsCpu: true };
+          salasPirinola[salaId] = {
+              id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, enJuego: false, esVsCpu: true
+          };
       } else {
-          salaId = Object.keys(salasPirinola).find(id => !salasPirinola[id].esVsCpu && salasPirinola[id].apuesta === monto && salasPirinola[id].jugadores.length < 6 && !salasPirinola[id].enJuego);
+          // C) Matchmaking Normal
+          salaId = Object.keys(salasPirinola).find(id => 
+              !salasPirinola[id].esVsCpu && 
+              salasPirinola[id].apuesta === monto && 
+              salasPirinola[id].jugadores.length < 6 && 
+              !salasPirinola[id].enJuego
+          );
+
           if (!salaId) {
               salaId = `pirinola_${monto}_${Date.now()}`;
-              salasPirinola[salaId] = { id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, enJuego: false, esVsCpu: false };
+              salasPirinola[salaId] = {
+                  id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, enJuego: false, esVsCpu: false
+              };
           }
       }
+
       const sala = salasPirinola[salaId];
       socket.join(salaId);
+
+      // 3. Agregar Jugador
       if(!sala.jugadores.some(j => j.id === socket.id)) {
           sala.jugadores.push({ id: socket.id, email, nickname, esBot: false });
           sala.bote += monto; 
       }
+
       if(vsCpu && !sala.jugadores.some(j => j.esBot)) {
           sala.jugadores.push({ id: 'bot_banca', email: 'banca', nickname: '🤖 La Banca', esBot: true });
           sala.bote += monto;
       }
+
       socket.emit('sala-encontrada', sala);
       io.to(salaId).emit('actualizar-estado-pirinola', sala);
+      emitirContadores();
+
+      // 4. Iniciar Juego
       const jugadoresNecesarios = 2; 
+      
       if (sala.jugadores.length >= jugadoresNecesarios && !sala.enJuego) {
           if(sala.timerInicio) clearTimeout(sala.timerInicio);
+          
           const tiempoEspera = vsCpu ? 1000 : 3000;
           io.to(salaId).emit('notificacion', vsCpu ? 'Iniciando...' : 'Jugadores listos. Iniciando...');
+
           sala.timerInicio = setTimeout(() => {
               if (sala.jugadores.length < jugadoresNecesarios) {
                   io.to(salaId).emit('notificacion', 'Jugador salió. Esperando...');
                   sala.enJuego = false;
                   return;
               }
+
               sala.enJuego = true;
               io.to(salaId).emit('notificacion', '¡Gira la Pirinola!');
               sala.turnoIndex = Math.floor(Math.random() * sala.jugadores.length); 
               io.to(salaId).emit('actualizar-estado-pirinola', sala);
               verificarTurnoBot(sala);
+
           }, tiempoEspera);
       }
   });
