@@ -253,29 +253,52 @@ app.post('/api/admin/recargar-manual', async (req, res) => {
 // 💸 SISTEMA DE TRANSFERENCIAS Y BÚSQUEDA (NUEVO) 💸
 // =========================================================
 
-// 1. BUSCAR DESTINATARIO (AHORA USANDO POST PARA SOPORTAR ESPACIOS)
+// 1. BUSCAR DESTINATARIO (MODO FLEXIBLE: IGNORA MAYÚSCULAS)
 app.post('/api/buscar-destinatario', async (req, res) => {
-    const { nickname } = req.body; // <--- Ahora lo leemos del body, no del query
+    const { nickname } = req.body;
     
     if (!nickname) return res.status(400).json({ error: "Falta nickname" });
 
+    // 1. Limpiamos lo que escribió el usuario (minúsculas y sin espacios extra)
+    const busqueda = nickname.trim().toLowerCase();
+    
+    console.log(`🔍 Buscando (flexible): "${busqueda}"`);
+
     try {
-        // Buscamos exacto (Firestore es case-sensitive)
-        const snapshot = await db.collection('usuarios').where('nickname', '==', nickname).limit(1).get();
+        // NOTA: Para apps enormes esto no es lo más eficiente, pero para tu Hub 
+        // con cientos/miles de usuarios funciona PERFECTO y sin errores.
+        const snapshot = await db.collection('usuarios').get();
         
-        if (snapshot.empty) {
+        let usuarioEncontrado = null;
+
+        // Revisamos uno por uno
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            if (data.nickname) {
+                // Comparamos peras con peras (todo en minúsculas)
+                const nickDb = data.nickname.trim().toLowerCase();
+                
+                if (nickDb === busqueda) {
+                    usuarioEncontrado = {
+                        email: doc.id,
+                        nickname: data.nickname, // Regresamos el original bonito
+                        avatar: data.avatar
+                    };
+                }
+            }
+        });
+
+        if (usuarioEncontrado) {
+            console.log("✅ Encontrado:", usuarioEncontrado.nickname);
+            return res.json({ 
+                success: true, 
+                destinatario: usuarioEncontrado 
+            });
+        } else {
+            console.log("❌ No encontrado en", snapshot.size, "usuarios.");
             return res.json({ success: false, error: "Usuario no encontrado" });
         }
 
-        const doc = snapshot.docs[0];
-        res.json({ 
-            success: true, 
-            destinatario: { 
-                email: doc.id, 
-                nickname: doc.data().nickname,
-                avatar: doc.data().avatar 
-            } 
-        });
     } catch (e) {
         console.error("Error buscar destinatario:", e);
         res.status(500).json({ error: "Error de servidor" });
