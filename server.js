@@ -982,7 +982,7 @@ io.on('connection', (socket) => {
 
           } catch (e) { console.error("Error lógica pirinola:", e); }
 
-      }, 4000);
+      }, 3200);
   }
 
   function verificarTurnoBot(sala) {
