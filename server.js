@@ -347,7 +347,7 @@ app.post('/api/transferir-saldo', async (req, res) => {
     }
 });
 
-// 3. HISTORIAL COMPLETO (Para el Modal de Historial)
+// 3. HISTORIAL COMPLETO (CORREGIDO HORA CDMX)
 app.get('/api/historial-usuario', async (req, res) => {
     const { email } = req.query;
     if (!email) return res.status(400).json({ error: "Falta email" });
@@ -355,17 +355,23 @@ app.get('/api/historial-usuario', async (req, res) => {
     try {
         const snapshot = await db.collection('usuarios').doc(email).collection('historial')
             .orderBy('fecha', 'desc')
-            .limit(50) // Traemos los últimos 50
+            .limit(50) 
             .get();
 
         const movimientos = snapshot.docs.map(doc => {
             const d = doc.data();
-            // Formatear fecha bonita
             let fechaBonita = "---";
-            if (d.fecha && d.fecha.toDate) {
-                fechaBonita = d.fecha.toDate().toLocaleString("es-MX", {
+            
+            // Verificamos si existe fecha y si es un Timestamp de Firestore
+            if (d.fecha) {
+                // Si es Timestamp de Firestore usa .toDate(), si es string usa new Date()
+                const fechaObj = d.fecha.toDate ? d.fecha.toDate() : new Date(d.fecha);
+                
+                // Formateamos a CDMX
+                fechaBonita = fechaObj.toLocaleString("es-MX", {
                     timeZone: "America/Mexico_City",
-                    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+                    day: '2-digit', month: '2-digit', year: 'numeric', // Año completo (2025)
+                    hour: '2-digit', minute: '2-digit', hour12: true
                 });
             }
 
@@ -375,7 +381,7 @@ app.get('/api/historial-usuario', async (req, res) => {
                 monto: d.monto || 0,
                 descripcion: d.descripcion || 'Movimiento',
                 esIngreso: d.esIngreso,
-                fecha: fechaBonita
+                fecha: fechaBonita // Enviamos la cadena ya formateada
             };
         });
 
