@@ -806,6 +806,63 @@ io.on('connection', (socket) => {
       io.to(sala).emit("reproducir-efecto-sonido", { soundId, emisor });
   });
 
+
+// =========================================================
+  // 🛒 TIENDA GENERAL (LOTERÍA: SONIDOS Y FICHAS) 🛒
+  // =========================================================
+
+  socket.on('comprar-item', async ({ email, itemId, precio }) => {
+      if (!email || !itemId) return;
+
+      try {
+          const userRef = db.collection('usuarios').doc(email);
+
+          await db.runTransaction(async (t) => {
+              const doc = await t.get(userRef);
+              if (!doc.exists) throw "Usuario no existe";
+
+              const data = doc.data();
+              const saldoActual = data.monedas || 0;
+              const inventario = data.inventario || [];
+
+              // Validaciones
+              if (saldoActual < precio) throw "Saldo insuficiente";
+              if (inventario.includes(itemId)) throw "Ya tienes este item";
+
+              // Ejecutar compra
+              const nuevoSaldo = saldoActual - precio;
+              const nuevoInventario = [...inventario, itemId];
+
+              t.update(userRef, { 
+                  monedas: nuevoSaldo, 
+                  inventario: nuevoInventario 
+              });
+
+              // Registrar en Historial (Dentro de la transacción para seguridad)
+              const historialRef = userRef.collection('historial').doc();
+              t.set(historialRef, {
+                  tipo: 'compra',
+                  monto: precio,
+                  descripcion: `Compra: ${itemId}`, // Ej: "Compra: skin_bitcoin"
+                  esIngreso: false,
+                  fecha: admin.firestore.FieldValue.serverTimestamp()
+              });
+          });
+
+          // Éxito: Enviamos datos actualizados al cliente
+          const docActualizado = await userRef.get();
+          socket.emit('usuario-actualizado', docActualizado.data());
+          
+          // Opcional: Feedback específico
+          socket.emit('compra-exitosa', { itemId });
+
+      } catch (e) {
+          console.error("Error en compra:", e);
+          // Podrías emitir un error al cliente si quisieras
+          // socket.emit('error-compra', e);
+      }
+  });
+
  // =========================================================
   // 🐍 BLOQUE SERPIENTES Y ESCALERAS (PRIVADO + PÚBLICO) 🐍
   // =========================================================
