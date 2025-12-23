@@ -726,50 +726,40 @@ io.on('connection', (socket) => {
       emitirContadores();
   }
 
-  // --- PIRINOLA ---
-  // --- ENTRAR A PIRINOLA (CON SOPORTE PARA INVITE) ---
-  socket.on('entrar-pirinola', async ({ email, nickname, apuesta, vsCpu, salaIdEspecifica }) => {
+  // =========================================================
+  // 🌀 BLOQUE PIRINOLA ROYAL (PRIVADAS + PÚBLICAS) 🌀
+  // =========================================================
+
+  // --- 1. JUEGO PÚBLICO (MATCHMAKING) ---
+  socket.on('entrar-pirinola', async ({ email, nickname, apuesta, vsCpu }) => {
+      // Validar Saldo
       const monto = parseInt(apuesta);
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
-      
       if (!doc.exists || doc.data().monedas < monto) {
           socket.emit('error-apuesta', 'Saldo insuficiente');
           return;
       }
 
-      // 1. Cobrar Entrada
+      // Cobrar y Registrar
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
-      await registrarMovimiento(email, 'apuesta', monto, 'Entrada Pirinola', false);
+      await registrarMovimiento(email, 'apuesta', monto, 'Pirinola Publica', false);
       const nuevoDoc = await userRef.get();
       socket.emit('usuario-actualizado', nuevoDoc.data());
 
       let salaId = null;
 
-      // 2. Lógica de Sala
-      if (salaIdEspecifica && salasPirinola[salaIdEspecifica]) {
-          // A) Intentar unirse a sala específica (Invitación)
-          const s = salasPirinola[salaIdEspecifica];
-          if (!s.enJuego && s.jugadores.length < 6 && s.apuesta === monto) {
-              salaId = salaIdEspecifica;
-          } else {
-              // Si la sala ya no existe, está llena o ya empezó, avisamos y reembolsamos
-              socket.emit('error-apuesta', 'La sala ya no está disponible o ya inició. (Reembolso procesado en salida)');
-              // El reembolso se procesará automáticamente al desconectar/salir por la lógica de disconnect
-              // O podemos forzar el reembolso aquí si queremos ser más estrictos, pero dejémoslo fluir.
-              return; 
-          }
-      } 
-      else if (vsCpu) {
-          // B) Vs CPU
+      if (vsCpu) {
           salaId = `cpu_${socket.id}_${Date.now()}`;
           salasPirinola[salaId] = {
-              id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, enJuego: false, esVsCpu: true
+              id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, 
+              enJuego: false, esVsCpu: true, esPrivada: false
           };
       } else {
-          // C) Matchmaking Normal
+          // Buscar sala pública disponible
           salaId = Object.keys(salasPirinola).find(id => 
               !salasPirinola[id].esVsCpu && 
+              !salasPirinola[id].esPrivada && // IMPORTANTE: No mezclar con privadas
               salasPirinola[id].apuesta === monto && 
               salasPirinola[id].jugadores.length < 6 && 
               !salasPirinola[id].enJuego
@@ -778,64 +768,140 @@ io.on('connection', (socket) => {
           if (!salaId) {
               salaId = `pirinola_${monto}_${Date.now()}`;
               salasPirinola[salaId] = {
-                  id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, enJuego: false, esVsCpu: false
+                  id: salaId, apuesta: monto, bote: 0, jugadores: [], turnoIndex: 0, 
+                  enJuego: false, esVsCpu: false, esPrivada: false
               };
           }
       }
 
+      unirseALaSalaLogica(socket, salaId, email, nickname, monto, vsCpu);
+  });
+
+  // --- 2. CREAR SALA PRIVADA (NUEVO) ---
+  socket.on('crear-sala-privada', async ({ email, nickname, apuesta }) => {
+      const monto = parseInt(apuesta);
+      const userRef = db.collection('usuarios').doc(email);
+      const doc = await userRef.get();
+      if (doc.data().monedas < monto) return socket.emit('error-apuesta', 'Saldo insuficiente');
+
+      // Cobrar
+      await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
+      await registrarMovimiento(email, 'apuesta', monto, 'Crear Mesa Privada', false);
+      socket.emit('usuario-actualizado', (await userRef.get()).data());
+
+      // Generar Código 4 Dígitos
+      const codigo = Math.floor(1000 + Math.random() * 9000).toString();
+      const salaId = `privada_${codigo}`;
+
+      salasPirinola[salaId] = {
+          id: salaId, codigo: codigo, apuesta: monto, bote: 0, jugadores: [], 
+          turnoIndex: 0, enJuego: false, esVsCpu: false, esPrivada: true, hostId: socket.id
+      };
+
+      unirseALaSalaLogica(socket, salaId, email, nickname, monto, false);
+  });
+
+  // --- 3. UNIRSE A SALA PRIVADA (NUEVO) ---
+  socket.on('unirse-sala-privada', async ({ email, nickname, codigo }) => {
+      // Buscar sala por código
+      const salaId = Object.keys(salasPirinola).find(id => salasPirinola[id].codigo === codigo);
+      
+      if (!salaId) return socket.emit('error-apuesta', 'Sala no encontrada');
+      const sala = salasPirinola[salaId];
+      if (sala.enJuego) return socket.emit('error-apuesta', 'La partida ya comenzó');
+      if (sala.jugadores.length >= 6) return socket.emit('error-apuesta', 'Sala llena');
+
+      const monto = sala.apuesta;
+      const userRef = db.collection('usuarios').doc(email);
+      const doc = await userRef.get();
+      if (doc.data().monedas < monto) return socket.emit('error-apuesta', `Necesitas $${monto} para entrar`);
+
+      // Cobrar
+      await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
+      await registrarMovimiento(email, 'apuesta', monto, `Unirse Mesa ${codigo}`, false);
+      socket.emit('usuario-actualizado', (await userRef.get()).data());
+
+      unirseALaSalaLogica(socket, salaId, email, nickname, monto, false);
+  });
+
+  // --- LÓGICA COMÚN DE UNIÓN ---
+  function unirseALaSalaLogica(socket, salaId, email, nickname, monto, vsCpu) {
       const sala = salasPirinola[salaId];
       socket.join(salaId);
 
-      // 3. Agregar Jugador
+      // Agregar Jugador
       if(!sala.jugadores.some(j => j.id === socket.id)) {
           sala.jugadores.push({ id: socket.id, email, nickname, esBot: false });
           sala.bote += monto; 
       }
 
+      // Agregar Bot (Solo si es Vs CPU)
       if(vsCpu && !sala.jugadores.some(j => j.esBot)) {
           sala.jugadores.push({ id: 'bot_banca', email: 'banca', nickname: '🤖 La Banca', esBot: true });
           sala.bote += monto;
       }
 
-      socket.emit('sala-encontrada', sala);
+      socket.emit('sala-encontrada', sala); // Envía info de sala al cliente
       io.to(salaId).emit('actualizar-estado-pirinola', sala);
       emitirContadores();
 
-      // 4. Iniciar Juego
-      const jugadoresNecesarios = 2; 
+      // --- LOGICA DE INICIO ---
       
-      if (sala.jugadores.length >= jugadoresNecesarios && !sala.enJuego) {
-          if(sala.timerInicio) clearTimeout(sala.timerInicio);
-          
-          const tiempoEspera = vsCpu ? 1000 : 3000;
-          io.to(salaId).emit('notificacion', vsCpu ? 'Iniciando...' : 'Jugadores listos. Iniciando...');
+      // CASO A: PÚBLICA / CPU -> Timer Automático
+      if (!sala.esPrivada) {
+          const jugadoresNecesarios = 2;
+          if (sala.jugadores.length >= jugadoresNecesarios && !sala.enJuego) {
+              if(sala.timerInicio) clearTimeout(sala.timerInicio);
+              
+              const tiempoEspera = vsCpu ? 1000 : 6000; // 6 seg para públicas (dar tiempo a amigos)
+              io.to(salaId).emit('notificacion', vsCpu ? 'Iniciando...' : `Iniciando en ${tiempoEspera/1000}s...`);
 
-          sala.timerInicio = setTimeout(() => {
-              if (sala.jugadores.length < jugadoresNecesarios) {
-                  io.to(salaId).emit('notificacion', 'Jugador salió. Esperando...');
-                  sala.enJuego = false;
-                  return;
-              }
+              sala.timerInicio = setTimeout(() => {
+                  if (sala.jugadores.length < jugadoresNecesarios) {
+                      io.to(salaId).emit('notificacion', 'Esperando jugadores...');
+                      return;
+                  }
+                  iniciarJuegoReal(sala);
+              }, tiempoEspera);
+          }
+      } 
+      // CASO B: PRIVADA -> Esperar al Host
+      else {
+          io.to(salaId).emit('notificacion', 'Esperando al anfitrión...');
+      }
+  }
 
-              sala.enJuego = true;
-              io.to(salaId).emit('notificacion', '¡Gira la Pirinola!');
-              sala.turnoIndex = Math.floor(Math.random() * sala.jugadores.length); 
-              io.to(salaId).emit('actualizar-estado-pirinola', sala);
-              verificarTurnoBot(sala);
-
-          }, tiempoEspera);
+  // --- 4. INICIAR MANUALMENTE (SOLO PRIVADAS) ---
+  socket.on('iniciar-juego-privado', (salaId) => {
+      const sala = salasPirinola[salaId];
+      if (sala && sala.hostId === socket.id && !sala.enJuego) {
+          if (sala.jugadores.length < 2) return; // Mínimo 2
+          iniciarJuegoReal(sala);
       }
   });
 
+  function iniciarJuegoReal(sala) {
+      sala.enJuego = true;
+      io.to(sala.id).emit('notificacion', '¡Juego Iniciado!');
+      sala.turnoIndex = Math.floor(Math.random() * sala.jugadores.length); 
+      io.to(sala.id).emit('juego-arrancado', sala); // Evento especial para quitar botones de espera
+      io.to(sala.id).emit('actualizar-estado-pirinola', sala);
+      verificarTurnoBot(sala);
+  }
+
+  // --- JUGABILIDAD (TIRAR Y PAGAR) ---
   socket.on('tirar-pirinola', (salaId) => { procesarTurnoPirinola(salaId, socket.id); });
 
   function procesarTurnoPirinola(salaId, solicitanteId) {
       const sala = salasPirinola[salaId];
       if (!sala || !sala.enJuego) return;
+
       const jugador = sala.jugadores[sala.turnoIndex];
       if (solicitanteId !== 'sistema' && jugador.id !== solicitanteId) return;
+
       const resultado = Math.floor(Math.random() * 6) + 1; 
       io.to(salaId).emit('resultado-giro', { cara: resultado });
+
       setTimeout(async () => {
           let mensaje = "";
           const nombre = jugador.nickname;
@@ -852,11 +918,12 @@ io.on('connection', (socket) => {
                   delete salasPirinola[salaId]; emitirContadores(); return; 
               } 
               else if (resultado === 6) { mensaje = "¡TODOS PONEN $1!"; for (let j of sala.jugadores) { await cobrarPirinola(j, 1, sala); } }
+              
               sala.turnoIndex = (sala.turnoIndex + 1) % sala.jugadores.length;
               io.to(salaId).emit('actualizar-estado-pirinola', sala);
               io.to(salaId).emit('notificacion', mensaje);
               verificarTurnoBot(sala);
-          } catch (e) { console.error("Error lógica pirinola:", e); }
+          } catch (e) { console.error("Error pirinola:", e); }
       }, 3200);
   }
 
@@ -881,7 +948,6 @@ io.on('connection', (socket) => {
       if (!jugador.esBot && pago > 0) {
           const userRef = db.collection('usuarios').doc(jugador.email);
           await userRef.update({ monedas: admin.firestore.FieldValue.increment(pago) });
-          // AQUÍ ESTÁ LA MAGIA VERDE
           await registrarMovimiento(jugador.email, 'victoria', pago, concepto || 'Ganancia Pirinola', true);
       }
   }
