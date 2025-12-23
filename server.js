@@ -638,6 +638,56 @@ io.on('connection', (socket) => {
     }
   });
 
+// --- RECONEXIÓN INTELIGENTE (ANTI-F5) ---
+  socket.on('reconectar', ({ sala, email }) => {
+      if (!salas[sala]) return;
+
+      // Unir el nuevo socket al canal de comunicación
+      socket.join(sala);
+
+      // Buscar si este email ya estaba jugando en esa sala
+      let socketIdViejo = null;
+      let datosJugador = null;
+
+      for (const [id, jugador] of Object.entries(salas[sala].jugadores)) {
+          if (jugador.email === email) {
+              socketIdViejo = id;
+              datosJugador = jugador;
+              break;
+          }
+      }
+
+      if (datosJugador && socketIdViejo) {
+          // INTERCAMBIO DE IDENTIDAD: Borramos el ID viejo y ponemos el nuevo
+          delete salas[sala].jugadores[socketIdViejo];
+          
+          datosJugador.id = socket.id; // Actualizamos al nuevo ID
+          salas[sala].jugadores[socket.id] = datosJugador;
+
+          console.log(`🔄 Usuario reconectado: ${datosJugador.nickname} en sala ${sala}`);
+
+          // Si era el Host, le devolvemos la corona
+          if (salas[sala].hostId === socketIdViejo) {
+              salas[sala].hostId = socket.id;
+              socket.emit('rol-asignado', { host: true });
+          } else {
+              socket.emit('rol-asignado', { host: false });
+          }
+
+          // LE DEVOLVEMOS SU TABLERO (Estado Restaurado)
+          // Esto hace que el frontend vuelva a pintar sus cartas seleccionadas
+          socket.emit('estado-sala-restaurado', {
+              enJuego: salas[sala].juegoIniciado,
+              cartas: datosJugador.cartas || [],
+              apostado: datosJugador.apostado || false,
+              monedas: datosJugador.monedas || 0
+          });
+
+          // Avisamos a todos que "revivió"
+          io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
+      }
+  });
+
   socket.on('apostar', async (data) => {
     const sala = data.sala;
     const cantidad = data.cantidad || 1;
