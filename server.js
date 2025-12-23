@@ -253,13 +253,14 @@ app.post('/api/admin/recargar-manual', async (req, res) => {
 // 💸 SISTEMA DE TRANSFERENCIAS Y BÚSQUEDA (NUEVO) 💸
 // =========================================================
 
-// 1. BUSCAR DESTINATARIO (Por Nickname)
-app.get('/api/buscar-destinatario', async (req, res) => {
-    const { nickname } = req.query;
+// 1. BUSCAR DESTINATARIO (AHORA USANDO POST PARA SOPORTAR ESPACIOS)
+app.post('/api/buscar-destinatario', async (req, res) => {
+    const { nickname } = req.body; // <--- Ahora lo leemos del body, no del query
+    
     if (!nickname) return res.status(400).json({ error: "Falta nickname" });
 
     try {
-        // Buscamos en toda la colección de usuarios quien tiene ese nickname
+        // Buscamos exacto (Firestore es case-sensitive)
         const snapshot = await db.collection('usuarios').where('nickname', '==', nickname).limit(1).get();
         
         if (snapshot.empty) {
@@ -267,7 +268,6 @@ app.get('/api/buscar-destinatario', async (req, res) => {
         }
 
         const doc = snapshot.docs[0];
-        // Retornamos solo lo necesario (email y nickname) por seguridad
         res.json({ 
             success: true, 
             destinatario: { 
