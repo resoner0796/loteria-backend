@@ -120,6 +120,48 @@ app.get('/api/usuario/datos-frescos', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Error servidor" }); }
 });
 
+
+// --- RECOMPENSA DIARIA (NUEVO) ---
+app.post('/api/recompensa-diaria', async (req, res) => {
+    const { email } = req.body;
+    if(!email) return res.status(400).json({ error: "Falta email" });
+
+    try {
+        const userRef = db.collection('usuarios').doc(email);
+        const doc = await userRef.get();
+        if(!doc.exists) return res.status(404).json({ error: "Usuario no encontrado" });
+
+        const data = doc.data();
+        const ultima = data.ultimaRecompensa ? data.ultimaRecompensa.toDate() : new Date(0);
+        const ahora = new Date();
+        const diferencia = ahora - ultima;
+        const horas24 = 24 * 60 * 60 * 1000;
+
+        if (diferencia >= horas24) {
+            // ¡Dar Recompensa!
+            const premio = 10;
+            await userRef.update({ 
+                monedas: admin.firestore.FieldValue.increment(premio),
+                ultimaRecompensa: admin.firestore.FieldValue.serverTimestamp()
+            });
+            await registrarMovimiento(email, 'premio', premio, '🎁 Regalo Diario', true);
+            
+            // Obtener saldo nuevo
+            const nuevoSaldo = (data.monedas || 0) + premio;
+            res.json({ success: true, nuevoSaldo, mensaje: "¡Recompensa cobrada!" });
+        } else {
+            // Aún falta tiempo
+            const restanteMs = horas24 - diferencia;
+            const horas = Math.floor(restanteMs / (1000 * 60 * 60));
+            const minutos = Math.floor((restanteMs % (1000 * 60 * 60)) / (1000 * 60));
+            res.json({ success: false, error: `Vuelve en ${horas}h ${minutos}m` });
+        }
+    } catch (e) { 
+        console.error("Error recompensa:", e); 
+        res.status(500).json({ error: "Error de servidor" }); 
+    }
+});
+
 // --- ADMIN DASHBOARD API ---
 
 // Stats Generales (VENTAS REALES vs DEUDA)
