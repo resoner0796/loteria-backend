@@ -722,24 +722,33 @@ io.on('connection', (socket) => {
       }
   });
 
+  // --- APOSTAR (CORREGIDO: COBRO POR CARTA) ---
   socket.on('apostar', async (data) => {
     const sala = data.sala;
     const email = data.email;
     
     if (salas[sala] && !salas[sala].juegoIniciado) {
-        // COBRAMOS LO QUE DIGA LA SALA
-        const costoReal = salas[sala].costoCarta || 1; 
-        
         const jugador = salas[sala].jugadores[socket.id];
-        if (jugador && !jugador.apostado && jugador.monedas >= costoReal) {
-            jugador.monedas -= costoReal;
+        
+        // 1. Verificamos que tenga cartas seleccionadas
+        const numCartas = jugador.cartas.length;
+        if (numCartas === 0) return; // No puede apostar si no eligió cartas
+
+        // 2. Calculamos el TOTAL: Costo de la sala x Número de cartas
+        const costoUnitario = salas[sala].costoCarta || 1;
+        const costoTotal = costoUnitario * numCartas;
+        
+        // 3. Verificamos si le alcanza para EL TOTAL
+        if (jugador && !jugador.apostado && jugador.monedas >= costoTotal) {
+            jugador.monedas -= costoTotal;
             jugador.apostado = true;
-            jugador.cantidadApostada = costoReal;
-            salas[sala].bote += costoReal;
+            jugador.cantidadApostada = costoTotal;
+            salas[sala].bote += costoTotal;
             
             if (email) {
                 await db.collection('usuarios').doc(email).update({ monedas: jugador.monedas });
-                await registrarMovimiento(email, 'apuesta', costoReal, `Apuesta ${salas[sala].modoJuego}`, false);
+                // Registramos el movimiento con el detalle del cálculo
+                await registrarMovimiento(email, 'apuesta', costoTotal, `Apuesta ${salas[sala].modoJuego} (${numCartas} cartas)`, false);
             }
             
             io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
