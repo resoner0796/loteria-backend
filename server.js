@@ -653,6 +653,7 @@ io.on('connection', (socket) => {
 
     salas[sala].jugadores[socket.id] = { 
         nickname, email, monedas: monedasIniciales, apostado: false, cartas: [], id: socket.id, host: (socket.id === salas[sala].hostId) 
+    racha: 0
     };
 
     // LE DECIMOS AL CLIENTE QUÉ MODO ES (Para que cargue las imágenes correctas)
@@ -866,25 +867,42 @@ io.on('connection', (socket) => {
       } else {
           const ganadoresReales = salaInfo.reclamantes.filter(r => r.status === 'validado');
           if (ganadoresReales.length > 0) {
-              const boteTotal = salaInfo.bote;
-              const premioPorCabeza = Math.floor(boteTotal / ganadoresReales.length);
-              for (const g of ganadoresReales) {
-                  const jugador = salaInfo.jugadores[g.id];
-                  if (jugador) {
-                      jugador.monedas += premioPorCabeza;
-                      await actualizarSaldoUsuario(jugador);
-                      await registrarMovimiento(jugador.email, 'victoria', premioPorCabeza, `Premio Lotería!`, true);
-                  }
+          const boteTotal = salaInfo.bote;
+          const premioPorCabeza = Math.floor(boteTotal / ganadoresReales.length);
+
+          // Lista de IDs ganadores para fácil acceso
+          const idsGanadores = ganadoresReales.map(g => g.id);
+
+          // RECORREMOS TODOS LOS JUGADORES PARA ACTUALIZAR RACHAS
+          for (const playerId in salaInfo.jugadores) {
+              const jugador = salaInfo.jugadores[playerId];
+
+              if (idsGanadores.includes(playerId)) {
+                  // ES GANADOR: Aumenta racha y da premio
+                  jugador.racha = (jugador.racha || 0) + 1;
+                  jugador.monedas += premioPorCabeza;
+                  await actualizarSaldoUsuario(jugador);
+                  // Solo registramos movimiento si tiene email
+                  if(jugador.email) await registrarMovimiento(jugador.email, 'victoria', premioPorCabeza, `Premio Lotería!`, true);
+              } else {
+                  // PERDEDOR: Se le apaga la flama
+                  jugador.racha = 0;
               }
-              salaInfo.bote = 0;
-              salaInfo.pagoRealizado = true;
-              salaInfo.reclamantes = [];
-              salaInfo.validandoEmpate = false;
-              for (const id in salaInfo.jugadores) salaInfo.jugadores[id].apostado = false;
-              io.to(sala).emit('ganadores-multiples', { ganadores: ganadoresReales.map(g => g.nickname), premio: premioPorCabeza });
-              io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores);
-              io.to(sala).emit('bote-actualizado', 0);
-          } else {
+
+              // Resetear apuesta
+              jugador.apostado = false;
+          }
+
+          salaInfo.bote = 0;
+          salaInfo.pagoRealizado = true;
+          salaInfo.reclamantes = [];
+          salaInfo.validandoEmpate = false;
+
+          io.to(sala).emit('ganadores-multiples', { ganadores: ganadoresReales.map(g => g.nickname), premio: premioPorCabeza });
+          io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores); // Aquí se envían las nuevas rachas
+          io.to(sala).emit('bote-actualizado', 0);
+      } 
+          else {
               salaInfo.validandoEmpate = false;
               salaInfo.reclamantes = [];
               salaInfo.juegoIniciado = true;
