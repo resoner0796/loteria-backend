@@ -89,6 +89,8 @@ app.post('/api/login', async (req, res) => {
             email: userData.email,
             avatar: userData.avatar, 
             inventario: userData.inventario || [] 
+            fichaActiva: userData.fichaActiva || 'assets/imagenes/ui/ficha.PNG',
+            cartasFavoritas: userData.cartasFavoritas || []
         });
     } catch (error) { res.status(500).json({ error: 'Error servidor.' }); }
 });
@@ -128,7 +130,9 @@ app.get('/api/usuario/datos-frescos', async (req, res) => {
             };
         });
         
-        res.json({ success: true, monedas: userDoc.data().monedas, historial });
+        res.json({ success: true, monedas: userDoc.data().monedas, historial, fichaActiva: userDoc.data().fichaActiva || 'assets/imagenes/ui/ficha.PNG',
+    cartasFavoritas: userDoc.data().cartasFavoritas || [],
+    inventario: userDoc.data().inventario || [] });
     } catch (error) { res.status(500).json({ error: "Error servidor" }); }
 });
 
@@ -1479,6 +1483,23 @@ io.on('connection', (socket) => {
           }
       }
 
+// --- GUARDAR PREFERENCIAS (FICHAS Y CARTAS) ---
+app.post('/api/usuario/guardar-preferencias', async (req, res) => {
+    const { email, fichaActiva, cartasFavoritas } = req.body;
+    if (!email) return res.status(400).json({ error: "Falta email" });
+
+    try {
+        const updateData = {};
+        if (fichaActiva) updateData.fichaActiva = fichaActiva;
+        if (cartasFavoritas) updateData.cartasFavoritas = cartasFavoritas;
+
+        await db.collection('usuarios').doc(email).update(updateData);
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Error guardando preferencias:", e);
+        res.status(500).json({ error: "Error al guardar" });
+    }
+});
       // Pirinola
       for (const pId in salasPirinola) {
           const sala = salasPirinola[pId];
