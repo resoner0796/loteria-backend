@@ -88,7 +88,7 @@ app.post('/api/login', async (req, res) => {
             monedas: userData.monedas, 
             email: userData.email,
             avatar: userData.avatar, 
-            inventario: userData.inventario || [] 
+            inventario: userData.inventario || [],
             fichaActiva: userData.fichaActiva || 'assets/imagenes/ui/ficha.PNG',
             cartasFavoritas: userData.cartasFavoritas || []
         });
