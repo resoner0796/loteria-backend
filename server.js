@@ -538,8 +538,23 @@ const MODOS_JUEGO = {
 
 // Función baraja SIEMPRE 54 (No importa el modo)
 function mezclarBaraja() {
-  const cartas = Array.from({ length: 54 }, (_, i) => String(i + 1).padStart(2, '0'));
-  return cartas.sort(() => Math.random() - 0.5);
+    // 1. Crear la baraja ordenada (01 al 54)
+    const cartas = Array.from({ length: 54 }, (_, i) => String(i + 1).padStart(2, '0'));
+
+    // 2. Algoritmo Fisher-Yates (Aleatoriedad Real)
+    // Recorremos el mazo de atrás para adelante e intercambiamos con una posición al azar
+    for (let i = cartas.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [cartas[i], cartas[j]] = [cartas[j], cartas[i]];
+    }
+
+    // 3. "Cortar" la baraja (Toque extra para romper patrones psicológicos)
+    // Cortamos el mazo en un punto aleatorio y pasamos lo de arriba para abajo
+    const puntoCorte = Math.floor(Math.random() * (cartas.length - 10)) + 5;
+    const arriba = cartas.slice(0, puntoCorte);
+    const abajo = cartas.slice(puntoCorte);
+
+    return [...abajo, ...arriba];
 }
 
 function repartirCartas(sala) {
@@ -778,7 +793,7 @@ io.on('connection', (socket) => {
         io.to(sala).emit('juego-iniciado');
         io.to(sala).emit('campana');
         setTimeout(() => { if(salas[sala]?.juegoIniciado) io.to(sala).emit('corre'); }, 2000);
-        setTimeout(() => { if(salas[sala]?.juegoIniciado) repartirCartas(sala); }, 5000);
+        setTimeout(() => { if(salas[sala]?.juegoIniciado) repartirCartas(sala); }, 2000);
       }
     }
   });
