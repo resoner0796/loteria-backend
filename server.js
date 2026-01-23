@@ -652,7 +652,7 @@ io.on('connection', (socket) => {
     }
 
     salas[sala].jugadores[socket.id] = { 
-        nickname, email, monedas: monedasIniciales, apostado: false, cartas: [], id: socket.id, host: (socket.id === salas[sala].hostId) 
+        nickname, email, monedas: monedasIniciales, apostado: false, cartas: [], id: socket.id, host: (socket.id === salas[sala].hostId), 
     racha: 0
     };
 
