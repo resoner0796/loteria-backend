@@ -809,7 +809,7 @@ io.on('connection', (socket) => {
         setTimeout(() => { if(salas[sala]?.juegoIniciado) io.to(sala).emit('corre'); }, 2000);
         
         // OJO: Aquí tu función se llama 'repartirCartas', pero en realidad es 'iniciarCanto'
-        setTimeout(() => { if(salas[sala]?.juegoIniciado) repartirCartas(sala); }, 4000); 
+        setTimeout(() => { if(salas[sala]?.juegoIniciado) repartirCartas(sala); }, 2000); 
       }
     }
 });
