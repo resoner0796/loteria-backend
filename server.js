@@ -781,8 +781,11 @@ io.on('connection', (socket) => {
   socket.on('iniciar-juego', (data) => {
     const sala = (typeof data === 'object') ? data.sala : data;
     const velocidad = (typeof data === 'object' && data.velocidad) ? parseInt(data.velocidad) : 3000;
+    
     if (salas[sala] && socket.id === salas[sala].hostId) {
       if (!salas[sala].juegoIniciado) {
+        
+        // 1. Preparar la mesa (Barajear)
         salas[sala].baraja = mezclarBaraja();
         salas[sala].historial = [];
         salas[sala].juegoIniciado = true;
@@ -790,14 +793,26 @@ io.on('connection', (socket) => {
         salas[sala].velocidad = velocidad;
         salas[sala].reclamantes = [];
         salas[sala].validandoEmpate = false;
+        
         if(salas[sala].timerEmpate) clearTimeout(salas[sala].timerEmpate);
+        
+        // 2. Avisar que arranca
         io.to(sala).emit('juego-iniciado');
+        
+        // 🔥🔥 ESTA ES LA LÍNEA QUE TE FALTA 🔥🔥
+        // Enviamos la lista actualizada para que se vea la FLAMA desde el inicio
+        io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores); 
+
         io.to(sala).emit('campana');
+        
+        // 3. Secuencia de arranque
         setTimeout(() => { if(salas[sala]?.juegoIniciado) io.to(sala).emit('corre'); }, 2000);
-        setTimeout(() => { if(salas[sala]?.juegoIniciado) repartirCartas(sala); }, 2000);
+        
+        // OJO: Aquí tu función se llama 'repartirCartas', pero en realidad es 'iniciarCanto'
+        setTimeout(() => { if(salas[sala]?.juegoIniciado) repartirCartas(sala); }, 4000); 
       }
     }
-  });
+});
 
   socket.on('detener-juego', (sala) => {
     if (salas[sala] && socket.id === salas[sala].hostId) {
