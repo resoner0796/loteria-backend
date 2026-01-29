@@ -611,10 +611,13 @@ app.post('/api/crear-orden', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Error orden" }); }
 });
 
+// --- CONFIRMACIÓN DE PAGO (CON DOBLE NOTIFICACIÓN) ---
 app.get('/api/confirmar-pago', async (req, res) => {
     const { session_id } = req.query;
+    
     try {
         const session = await stripe.checkout.sessions.retrieve(session_id);
+        
         if (session.payment_status === 'paid') {
             const email = session.metadata.email_usuario;
             const monedasExtra = parseInt(session.metadata.monedas_a_dar);
@@ -623,16 +626,54 @@ app.get('/api/confirmar-pago', async (req, res) => {
             
             const userRef = db.collection('usuarios').doc(email);
             const doc = await userRef.get();
+            
             if (doc.exists) {
-                await userRef.update({ monedas: (doc.data().monedas || 0) + monedasExtra });
+                const userData = doc.data();
+                
+                // 1. Actualizar Saldo y Finanzas
+                await userRef.update({ monedas: (userData.monedas || 0) + monedasExtra });
                 await registrarMovimiento(email, 'recarga', monedasExtra, 'Recarga con Tarjeta', true);
                 
-                // REGISTRAR VENTA REAL (NUEVO)
                 const finanzasRef = db.collection('finanzas').doc('general');
                 await finanzasRef.set({ 
                     totalVentasMXN: admin.firestore.FieldValue.increment(dineroReal),
                     ultimaActualizacion: new Date()
                 }, { merge: true });
+
+                // =============================================
+                // 🔔 ZONA DE NOTIFICACIONES DE VENTA 🔔
+                // =============================================
+
+                // A) NOTIFICACIÓN AL USUARIO (Recibo Digital)
+                if (userData.fcmToken) {
+                    try {
+                        const msgUser = {
+                            data: {
+                                titulo: "✅ ¡Pago Exitoso!",
+                                cuerpo: `Se agregaron ${monedasExtra} monedas a tu cuenta. ¡A jugar!`
+                            },
+                            token: userData.fcmToken
+                        };
+                        await admin.messaging().send(msgUser);
+                    } catch(e) { console.error("Error push usuario:", e); }
+                }
+
+                // B) NOTIFICACIÓN AL ADMIN (Ka-ching! 🤑)
+                try {
+                    // Pon aquí TU email de admin real para que te busque
+                    const adminDoc = await db.collection('usuarios').doc("admin@loteria.com").get();
+                    if (adminDoc.exists && adminDoc.data().fcmToken) {
+                        const msgAdmin = {
+                            data: {
+                                titulo: "🤑 ¡Nueva Venta!",
+                                cuerpo: `Usuario ${userData.nickname} compró $${dineroReal} MXN (${monedasExtra} monedas).`
+                            },
+                            token: adminDoc.data().fcmToken
+                        };
+                        await admin.messaging().send(msgAdmin);
+                    }
+                } catch(e) { console.error("Error push admin:", e); }
+                // =============================================
             }
 
             if (origen === 'hub') res.redirect(`${FRONTEND_HUB}/index.html?pago=exito&cantidad=${monedasExtra}`);
@@ -640,7 +681,10 @@ app.get('/api/confirmar-pago', async (req, res) => {
         } else {
             res.redirect(`${FRONTEND_HUB}/index.html?pago=cancelado`);
         }
-    } catch (error) { res.redirect(`${FRONTEND_HUB}/index.html?pago=error`); }
+    } catch (error) { 
+        console.error(error);
+        res.redirect(`${FRONTEND_HUB}/index.html?pago=error`); 
+    }
 });
 
 // FUNCIONES DE JUEGO (REEMBOLSOS LOTERIA)
