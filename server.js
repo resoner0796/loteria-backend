@@ -45,6 +45,23 @@ const SNAKES = { 18:6, 25:9, 33:19, 41:24, 48:32, 53:13 };
 const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
 const ADMIN_EMAIL = "admin@loteria.com"; 
 
+
+
+// --- GUARDAR TOKEN FCM DEL ADMIN ---
+app.post('/api/admin/guardar-fcm', async (req, res) => {
+    const { email, fcmToken } = req.body;
+    // Solo permitimos guardar si es el admin real
+    if (email !== ADMIN_EMAIL) return res.status(403).json({ error: "No autorizado" });
+    
+    try {
+        await db.collection('usuarios').doc(email).update({ fcmToken: fcmToken });
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Error guardando token FCM:", e);
+        res.status(500).json({ error: "Error interno" });
+    }
+});
+
 // ==================== RUTAS API ====================
 
 app.get('/', (req, res) => res.send('Servidor Juegos en la Nube ☁️ Funcionando ✅'));
@@ -62,6 +79,27 @@ app.post('/api/registro', async (req, res) => {
             email, password: hashedPassword, nickname, monedas: 20, 
             creado: new Date(), baneado: false 
         });
+
+        // 🔥 LOGICA NOTIFICACIÓN PUSH AL ADMIN 🔥
+        try {
+            const adminDoc = await db.collection('usuarios').doc(ADMIN_EMAIL).get();
+            if (adminDoc.exists && adminDoc.data().fcmToken) {
+                const mensajePush = {
+                    notification: {
+                        title: '💰 Nuevo Usuario',
+                        body: `${nickname} se ha registrado.`
+                    },
+                    token: adminDoc.data().fcmToken
+                };
+                await admin.messaging().send(mensajePush);
+                console.log("🔔 Notificación enviada al Admin");
+            }
+        } catch (pushError) {
+            console.error("Error enviando push:", pushError);
+            // No detenemos el registro si falla la notificación
+        }
+        // ----------------------------------------
+
         res.json({ success: true, nickname, monedas: 20, email });
     } catch (error) { res.status(500).json({ error: 'Error servidor.' }); }
 });
