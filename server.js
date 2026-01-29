@@ -3,6 +3,7 @@
 // ==================== CONFIG FIREBASE ====================
 const admin = require('firebase-admin');
 const serviceAccount = JSON.parse(process.env.nicknames); 
+const cron = require('node-cron');
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -46,20 +47,76 @@ const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
 const ADMIN_EMAIL = "admin@loteria.com"; 
 
 
+// ==========================================
+// 🔔 GESTIÓN DE NOTIFICACIONES (FINAL)
+// ==========================================
 
-// --- GUARDAR TOKEN FCM DEL ADMIN ---
-app.post('/api/admin/guardar-fcm', async (req, res) => {
+// 1. GUARDAR TOKEN (Para cualquier usuario)
+app.post('/api/usuario/guardar-fcm', async (req, res) => {
     const { email, fcmToken } = req.body;
-    // Solo permitimos guardar si es el admin real
-    if (email !== ADMIN_EMAIL) return res.status(403).json({ error: "No autorizado" });
-    
+    if (!email || !fcmToken) return res.status(400).json({ error: "Datos incompletos" });
     try {
         await db.collection('usuarios').doc(email).update({ fcmToken: fcmToken });
         res.json({ success: true });
-    } catch (e) {
-        console.error("Error guardando token FCM:", e);
-        res.status(500).json({ error: "Error interno" });
-    }
+    } catch (e) { res.status(500).json({ error: "Error interno" }); }
+});
+
+// 2. BROADCAST (Mensaje Masivo del Admin)
+app.post('/api/admin/broadcast', async (req, res) => {
+    const { titulo, cuerpo } = req.body;
+    const adminEmail = req.headers['admin-email'];
+    
+    if (adminEmail !== "admin@loteria.com") return res.status(403).json({ error: "No autorizado" });
+
+    try {
+        const snapshot = await db.collection('usuarios').where('fcmToken', '!=', null).get();
+        if (snapshot.empty) return res.json({ success: true, enviados: 0 });
+
+        const tokens = [];
+        snapshot.forEach(doc => { if(doc.data().fcmToken) tokens.push(doc.data().fcmToken); });
+
+        if (tokens.length > 0) {
+            const message = {
+                data: { titulo: titulo, cuerpo: cuerpo }, // 'data' para control total
+                tokens: tokens
+            };
+            const response = await admin.messaging().sendMulticast(message);
+            res.json({ success: true, enviados: response.successCount });
+        } else {
+            res.json({ success: true, enviados: 0 });
+        }
+    } catch (e) { res.status(500).json({ error: "Error broadcast" }); }
+});
+
+// 3. TAREA AUTOMÁTICA: REGALO DIARIO (6:00 PM)
+cron.schedule('0 18 * * *', async () => {
+    console.log("⏰ Cron: Verificando regalos diarios...");
+    try {
+        const snapshot = await db.collection('usuarios').where('fcmToken', '!=', null).get();
+        const tokensParaEnviar = [];
+        const ahora = new Date();
+        const horas24 = 24 * 60 * 60 * 1000;
+
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            const ultima = data.ultimaRecompensa ? data.ultimaRecompensa.toDate() : new Date(0);
+            if ((ahora - ultima) >= horas24) {
+                if(data.fcmToken) tokensParaEnviar.push(data.fcmToken);
+            }
+        });
+
+        if (tokensParaEnviar.length > 0) {
+            const message = {
+                data: {
+                    titulo: "🎁 ¡Tu regalo está listo!",
+                    cuerpo: "Tus monedas gratis te esperan. ¡Entra ya!"
+                },
+                tokens: tokensParaEnviar
+            };
+            await admin.messaging().sendMulticast(message);
+            console.log(`🎁 Recordatorio enviado a ${tokensParaEnviar.length} usuarios.`);
+        }
+    } catch (e) { console.error("Error cron:", e); }
 });
 
 // ==================== RUTAS API ====================
@@ -80,26 +137,21 @@ app.post('/api/registro', async (req, res) => {
             creado: new Date(), baneado: false 
         });
 
-        // 🔥 LOGICA NOTIFICACIÓN PUSH AL ADMIN 🔥
+        // 🔥 NOTIFICACIÓN PUSH AL ADMIN (Usando 'data' para evitar duplicados)
         try {
-            const adminDoc = await db.collection('usuarios').doc(ADMIN_EMAIL).get();
+            const adminDoc = await db.collection('usuarios').doc("admin@loteria.com").get(); // Asegúrate que este sea tu email de admin
             if (adminDoc.exists && adminDoc.data().fcmToken) {
                 const mensajePush = {
-                    notification: {
-                        title: '💰 Nuevo Usuario',
-                        body: `${nickname} se ha registrado.`
+                    data: {
+                        titulo: '💰 Nuevo Usuario',
+                        cuerpo: `${nickname} (${email}) se ha unido.`
                     },
                     token: adminDoc.data().fcmToken
                 };
                 await admin.messaging().send(mensajePush);
-                console.log("🔔 Notificación enviada al Admin");
             }
-        } catch (pushError) {
-            console.error("Error enviando push:", pushError);
-            // No detenemos el registro si falla la notificación
-        }
-        // ----------------------------------------
-
+        } catch (pushError) { console.error("Error push admin:", pushError); }
+        
         res.json({ success: true, nickname, monedas: 20, email });
     } catch (error) { res.status(500).json({ error: 'Error servidor.' }); }
 });
