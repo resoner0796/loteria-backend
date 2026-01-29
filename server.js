@@ -61,63 +61,56 @@ app.post('/api/usuario/guardar-fcm', async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Error interno" }); }
 });
 
-// 2. BROADCAST (Mensaje Masivo del Admin) - VERSIÓN BLINDADA
+// 2. BROADCAST (CORREGIDO ERROR 404 /BATCH)
 app.post('/api/admin/broadcast', async (req, res) => {
     const { titulo, cuerpo } = req.body;
     const adminEmail = req.headers['admin-email'];
     
-    // Validación estricta de admin
+    // Verificación
     if (!adminEmail || adminEmail.toLowerCase() !== "admin@loteria.com") {
         return res.status(403).json({ error: "No autorizado" });
     }
 
     try {
-        // Obtenemos tokens
-        const snapshot = await db.collection('usuarios').where('fcmToken', '!=', null).get();
+        // Obtenemos todos los usuarios
+        const snapshot = await db.collection('usuarios').get();
         
         if (snapshot.empty) return res.json({ success: true, enviados: 0 });
 
         const tokens = [];
         snapshot.forEach(doc => { 
             const data = doc.data();
-            if(data.fcmToken && typeof data.fcmToken === 'string') {
+            // Filtramos tokens válidos
+            if(data.fcmToken && typeof data.fcmToken === 'string' && data.fcmToken.length > 10) {
                 tokens.push(data.fcmToken);
             }
         });
 
-        // Solo enviamos si hay destinatarios
+        console.log(`📢 Intentando enviar a ${tokens.length} dispositivos...`);
+
         if (tokens.length > 0) {
             const message = {
                 data: { 
-                    // 🔥 FORZAMOS A STRING PARA EVITAR ERRORES DE FIREBASE
                     titulo: String(titulo || "Aviso"), 
                     cuerpo: String(cuerpo || "...") 
                 }, 
                 tokens: tokens
             };
             
-            const response = await admin.messaging().sendMulticast(message);
-            console.log(`📢 Broadcast: ${response.successCount} enviados, ${response.failureCount} fallidos.`);
+            // 🔥 AQUÍ ESTÁ EL CAMBIO MÁGICO 🔥
+            // Cambiamos sendMulticast por sendEachForMulticast
+            const response = await admin.messaging().sendEachForMulticast(message);
             
-            // Si fallaron algunos, limpiamos tokens viejos (Opcional pero recomendado)
-            if (response.failureCount > 0) {
-                response.responses.forEach((resp, idx) => {
-                    if (!resp.success) {
-                        // Si el error es que el token ya no existe, podrías borrarlo aquí
-                        // console.log(`Token fallido: ${tokens[idx]} - Error: ${resp.error}`);
-                    }
-                });
-            }
-
+            console.log(`✅ Broadcast resultado: ${response.successCount} ok, ${response.failureCount} error.`);
+            
             res.json({ success: true, enviados: response.successCount });
         } else {
             res.json({ success: true, enviados: 0 });
         }
 
     } catch (e) { 
-        // 🔥 ESTE LOG TE DIRÁ EN RENDER QUÉ PASÓ REALMENTE
-        console.error("❌ CRITICAL ERROR BROADCAST:", e); 
-        res.status(500).json({ error: "Error interno (Revisar Logs)" }); 
+        console.error("❌ ERROR BROADCAST:", e); 
+        res.status(500).json({ error: e.message || "Error interno" }); 
     }
 });
 // 3. TAREA AUTOMÁTICA: REGALO DIARIO (6:00 PM)
@@ -145,8 +138,11 @@ cron.schedule('0 18 * * *', async () => {
                 },
                 tokens: tokensParaEnviar
             };
-            await admin.messaging().sendMulticast(message);
-            console.log(`🎁 Recordatorio enviado a ${tokensParaEnviar.length} usuarios.`);
+            
+            // 🔥 CAMBIO AQUÍ TAMBIÉN:
+            const response = await admin.messaging().sendEachForMulticast(message);
+            
+            console.log(`🎁 Recordatorio enviado a ${response.successCount} usuarios.`);
         }
     } catch (e) { console.error("Error cron:", e); }
 });
