@@ -508,6 +508,7 @@ app.post('/api/transferir-saldo', async (req, res) => {
     }
 });
 
+
 // 3. HISTORIAL COMPLETO (CORREGIDO HORA CDMX)
 app.get('/api/historial-usuario', async (req, res) => {
     const { email } = req.query;
