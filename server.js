@@ -427,7 +427,7 @@ app.post('/api/buscar-destinatario', async (req, res) => {
     }
 });
 
-// 2. TRANSFERIR SALDO
+// 2. TRANSFERIR SALDO (CON NOTIFICACIÓN AL DESTINATARIO)
 app.post('/api/transferir-saldo', async (req, res) => {
     const { origenEmail, destinoEmail, cantidad } = req.body;
     const monto = parseInt(cantidad);
@@ -441,6 +441,8 @@ app.post('/api/transferir-saldo', async (req, res) => {
     }
 
     try {
+        let nicknameOrigen = "Alguien"; // Para el mensaje
+
         await db.runTransaction(async (t) => {
             const origenRef = db.collection('usuarios').doc(origenEmail);
             const destinoRef = db.collection('usuarios').doc(destinoEmail);
@@ -448,47 +450,61 @@ app.post('/api/transferir-saldo', async (req, res) => {
             const origenDoc = await t.get(origenRef);
             const destinoDoc = await t.get(destinoRef);
 
-            if (!origenDoc.exists || !destinoDoc.exists) {
-                throw new Error("Usuario no encontrado");
-            }
+            if (!origenDoc.exists || !destinoDoc.exists) throw "Usuario no encontrado";
 
             const saldoActual = origenDoc.data().monedas || 0;
-            if (saldoActual < monto) {
-                throw new Error("Saldo insuficiente");
-            }
+            if (saldoActual < monto) throw "Saldo insuficiente";
 
-            // Restar al origen
+            nicknameOrigen = origenDoc.data().nickname; // Guardamos el nombre para la noti
+
+            // Operación Financiera
             t.update(origenRef, { monedas: admin.firestore.FieldValue.increment(-monto) });
-            
-            // Sumar al destino
             t.update(destinoRef, { monedas: admin.firestore.FieldValue.increment(monto) });
 
-            // Registrar Historial ORIGEN (Egreso)
-            const historialOrigenRef = origenRef.collection('historial').doc();
-            t.set(historialOrigenRef, {
-                tipo: 'transferencia',
-                monto: monto,
-                descripcion: `Envío a ${destinoDoc.data().nickname}`,
-                esIngreso: false,
-                fecha: admin.firestore.FieldValue.serverTimestamp()
+            // Historial Origen
+            const histRef1 = origenRef.collection('historial').doc();
+            t.set(histRef1, {
+                tipo: 'transferencia', monto: monto, descripcion: `Envío a ${destinoDoc.data().nickname}`,
+                esIngreso: false, fecha: admin.firestore.FieldValue.serverTimestamp()
             });
 
-            // Registrar Historial DESTINO (Ingreso)
-            const historialDestinoRef = destinoRef.collection('historial').doc();
-            t.set(historialDestinoRef, {
-                tipo: 'transferencia',
-                monto: monto,
-                descripcion: `Recibido de ${origenDoc.data().nickname}`,
-                esIngreso: true,
-                fecha: admin.firestore.FieldValue.serverTimestamp()
+            // Historial Destino
+            const histRef2 = destinoRef.collection('historial').doc();
+            t.set(histRef2, {
+                tipo: 'transferencia', monto: monto, descripcion: `Recibido de ${nicknameOrigen}`,
+                esIngreso: true, fecha: admin.firestore.FieldValue.serverTimestamp()
             });
         });
+
+        // 🔥 NOTIFICACIÓN PUSH AL DESTINATARIO (FUERA DE LA TRANSACCIÓN)
+        try {
+            const destinoDoc = await db.collection('usuarios').doc(destinoEmail).get();
+            const tokenDestino = destinoDoc.data().fcmToken;
+
+            if (tokenDestino) {
+                const message = {
+                    data: {
+                        titulo: "🤑 ¡Recibiste Monedas!",
+                        cuerpo: `${nicknameOrigen} te envió $${monto}. ¡Entra a jugar!`
+                    },
+                    token: tokenDestino
+                };
+                // Usamos sendEachForMulticast o send (si es uno solo)
+                // Como es uno solo, .send() funciona, pero tu corrección usa .sendEach... para arrays.
+                // Para uno solo directo usamos .send():
+                await admin.messaging().send(message);
+                console.log(`🔔 Notificación de transferencia enviada a ${destinoEmail}`);
+            }
+        } catch (pushError) {
+            console.error("Error enviando push transferencia:", pushError);
+            // No fallamos la request principal, solo logueamos el error de push
+        }
 
         res.json({ success: true });
 
     } catch (e) {
         console.error("Error transferencia:", e);
-        res.status(400).json({ success: false, error: e.message || "Error al transferir" });
+        res.status(400).json({ success: false, error: e.message || e });
     }
 });
 
