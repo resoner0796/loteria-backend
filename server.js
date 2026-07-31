@@ -1576,17 +1576,29 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('veredicto-host', async ({ sala, candidatoId, esValido, cartaGanadora }) => {
+  socket.on('veredicto-host', async ({ sala, candidatoId, esValido, tablaGanadora }) => {
       const salaInfo = salas[sala];
       if (!salaInfo || socket.id !== salaInfo.hostId) return;
       const candidato = salaInfo.reclamantes.find(r => r.id === candidatoId);
       if (candidato) candidato.status = esValido ? 'validado' : 'rechazado';
 
-      // Con qué carta se cerró la tabla. Sirve sobre todo cuando el anfitrión se
-      // valida a sí mismo: enseñarla a todos deja el veredicto a la vista en vez
-      // de pedir que le crean. Solo se acepta si de verdad se cantó.
-      if (esValido && cartaGanadora && salaInfo.historial.includes(String(cartaGanadora))) {
-          salaInfo.cartaGanadora = String(cartaGanadora);
+      // CUÁL de sus tablas se llenó. Se guarda junto con las fichas que tenía
+      // encima, porque esa tabla completa es la prueba que ve la sala. Importa
+      // sobre todo cuando el anfitrión se valida a sí mismo: pasa de pedir que
+      // le crean a poder enseñarlo.
+      //
+      // Solo se acepta si la tabla era de verdad del reclamante; si no, el
+      // anfitrión podría señalar una tabla que esa persona nunca tuvo.
+      if (esValido && candidato && tablaGanadora) {
+          const suyas = candidato.boardState?.cards || [];
+          if (suyas.includes(String(tablaGanadora))) {
+              salaInfo.pruebaVictoria = {
+                  tabla: String(tablaGanadora),
+                  fichas: candidato.boardState?.chips?.[String(tablaGanadora)] || [],
+                  skin: candidato.boardState?.skin || null,
+                  nickname: candidato.nickname
+              };
+          }
       }
       const pendientes = salaInfo.reclamantes.filter(r => r.status === 'pendiente');
       if (pendientes.length > 0) {
@@ -1628,9 +1640,9 @@ io.on('connection', (socket) => {
           io.to(sala).emit('ganadores-multiples', {
               ganadores: ganadoresReales.map(g => g.nickname),
               premio: premioPorCabeza,
-              cartaGanadora: salaInfo.cartaGanadora || null
+              prueba: salaInfo.pruebaVictoria || null
           });
-          salaInfo.cartaGanadora = null;
+          salaInfo.pruebaVictoria = null;
           io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores); // Aquí se envían las nuevas rachas
           io.to(sala).emit('bote-actualizado', 0);
       } 
