@@ -11,6 +11,23 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+// --- HELPER: EMISIÓN DE LA BANCA ---
+// En los modos contra la CPU el bot aporta al bote monedas que no salieron de
+// ninguna cuenta. Eso infla la economía en silencio, y como las monedas se
+// compran con dinero real y se transfieren entre jugadores, es un pasivo.
+// No lo prohibimos —es una decisión de producto— pero lo medimos, para que el
+// número exista y se pueda vigilar.
+async function registrarEmisionBanca(cantidad, concepto) {
+    if (!cantidad) return;
+    try {
+        await db.collection('finanzas').doc('general').set({
+            monedasEmitidasBanca: admin.firestore.FieldValue.increment(cantidad),
+            ultimaActualizacion: new Date()
+        }, { merge: true });
+        console.log(`🏦 Banca ${cantidad > 0 ? 'emitió' : 'recuperó'} ${Math.abs(cantidad)} (${concepto})`);
+    } catch (e) { console.error("Error emisión banca:", e); }
+}
+
 // --- HELPER HISTORIAL ---
 async function registrarMovimiento(email, tipo, monto, descripcion, esIngreso) {
     if(!email) return; 
@@ -35,7 +52,35 @@ const cors = require('cors');
 app.use(cors());
 app.use(express.json());
 
+// Render sirve detrás de su propio proxy. Sin esto, req.ip sería siempre la IP
+// del proxy y todos los usuarios compartirían el mismo contador de rate limit:
+// bastaría con que uno se pasara para bloquear a todos los demás.
+app.set('trust proxy', 1);
+
 const PORT = process.env.PORT || 3000;
+
+// ==========================================================
+// 🚦 LÍMITES DE PETICIONES
+// ==========================================================
+// Sin esto se puede probar contraseñas por fuerza bruta contra /login, crear
+// cuentas en masa (cada una regala 20 monedas de bienvenida) y recorrer toda la
+// base de usuarios llamando a /buscar-destinatario con un nickname tras otro.
+const rateLimit = require('express-rate-limit');
+
+const limitador = (minutos, maximo, mensaje) => rateLimit({
+    windowMs: minutos * 60 * 1000,
+    max: maximo,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: mensaje }
+});
+
+const limiteLogin    = limitador(15, 10, 'Demasiados intentos. Espera unos minutos.');
+const limiteRegistro = limitador(60,  5, 'Demasiadas cuentas creadas desde aquí. Intenta más tarde.');
+const limiteBusqueda = limitador(15, 40, 'Demasiadas búsquedas. Espera un momento.');
+
+// Techo general holgado: no debe estorbar al juego, solo frenar abusos.
+app.use('/api/', limitador(1, 200, 'Vas demasiado rápido. Espera un momento.'));
 
 // ==========================================================
 // 🔑 AUTENTICACIÓN JWT — FASE DE CONVIVENCIA
@@ -134,6 +179,11 @@ const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
 // para no romper el despliegue actual.
 // ⚠️ TEMPORAL: comparar un email sigue siendo una autorización débil. La solución real
 // es un rol 'admin' en Firestore verificado contra el JWT (Fase 1).
+// Cuánto puede poner la banca en una mesa contra la CPU, como múltiplo de la
+// apuesta. Acota la exposición de la casa y evita que el bot alimente el bote
+// indefinidamente.
+const TOPE_BANCA_POR_MESA = 3;
+
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || "admin@loteria.com").trim().toLowerCase();
 
 function esAdmin(email) {
@@ -262,7 +312,7 @@ cron.schedule('0 18 * * *', async () => {
 app.get('/', (req, res) => res.send('Servidor Juegos en la Nube ☁️ Funcionando ✅'));
 
 // 1. REGISTRO
-app.post('/api/registro', async (req, res) => {
+app.post('/api/registro', limiteRegistro, async (req, res) => {
     const { email, password, nickname } = req.body;
     if (!nicknameValido(nickname)) {
         return res.status(400).json({ error: 'El nickname debe tener entre 3 y 20 caracteres, sin símbolos raros.' });
@@ -302,7 +352,7 @@ app.post('/api/registro', async (req, res) => {
 });
 
 // 2. LOGIN (CON VALIDACIÓN DE BANEO)
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', limiteLogin, async (req, res) => {
     const { email, password } = req.body;
     try {
         const userRef = db.collection('usuarios').doc(email);
@@ -542,7 +592,7 @@ app.post('/api/admin/recargar-manual', async (req, res) => {
 // =========================================================
 
 // 1. BUSCAR DESTINATARIO (MODO FLEXIBLE: IGNORA MAYÚSCULAS)
-app.post('/api/buscar-destinatario', async (req, res) => {
+app.post('/api/buscar-destinatario', limiteBusqueda, async (req, res) => {
     const { nickname } = req.body;
     
     if (!nickname) return res.status(400).json({ error: "Falta nickname" });
@@ -1479,10 +1529,14 @@ io.on('connection', (socket) => {
 
       if (vsCpu) {
           salaId = `cpu_${socket.id}_${Date.now()}`;
+          // El bote es el doble de la apuesta: el jugador pone una y la casa
+          // pone la otra. Esa segunda mitad no sale de ninguna cuenta, así que
+          // la contabilizamos como emisión para poder vigilarla.
           salasSerpientes[salaId] = {
-              id: salaId, apuesta: monto, jugadores: [], turnoIndex: 0, 
+              id: salaId, apuesta: monto, jugadores: [], turnoIndex: 0,
               enJuego: false, bote: monto * 2, esVsCpu: true, esPrivada: false
           };
+          registrarEmisionBanca(monto, 'Ante de la banca en Serpientes');
       } else {
           // Buscar Pública
           salaId = Object.keys(salasSerpientes).find(id => 
@@ -1608,8 +1662,18 @@ io.on('connection', (socket) => {
   function iniciarJuegoSerpientesReal(sala) {
       sala.enJuego = true;
       sala.timerInicio = null;
+      // El turno inicial se sortea. Antes empezaba siempre el jugador de la
+      // posición 0, que contra la CPU era siempre el humano; en serpientes y
+      // escaleras tirar primero es una ventaja medible, así que contra la banca
+      // el juego no era una moneda al aire.
+      sala.turnoIndex = Math.floor(Math.random() * sala.jugadores.length);
       io.to(sala.id).emit('inicio-partida-serpientes', { salaId: sala.id, jugadores: sala.jugadores });
-      io.to(sala.id).emit('turno-asignado', sala.jugadores[0].nickname);
+      io.to(sala.id).emit('turno-asignado', sala.jugadores[sala.turnoIndex].nickname);
+
+      // Si le tocó a la banca, hay que arrancarle el turno.
+      if (sala.jugadores[sala.turnoIndex].esBot) {
+          setTimeout(() => procesarTurnoSerpientes(sala.id, 'sistema'), 2000);
+      }
   }
 
   // --- SALIR / REEMBOLSO (Igual que antes pero adaptado) ---
@@ -1679,6 +1743,11 @@ io.on('connection', (socket) => {
 
   async function finalizarJuegoSerpientes(sala, ganador) {
       const premio = sala.bote;
+      // Si gana la banca el bote no se paga a nadie: descontamos de la emisión
+      // lo que había puesto, para que el contador refleje el neto real.
+      if (ganador.esBot && sala.esVsCpu) {
+          await registrarEmisionBanca(-sala.apuesta, 'La banca gana en Serpientes');
+      }
       if (!ganador.esBot) {
           const userRef = db.collection('usuarios').doc(ganador.email);
           await userRef.update({ monedas: admin.firestore.FieldValue.increment(premio) });
@@ -1806,8 +1875,16 @@ io.on('connection', (socket) => {
 
       // Agregar Bot (Solo si es Vs CPU)
       if(vsCpu && !sala.jugadores.some(j => j.esBot)) {
-          sala.jugadores.push({ id: 'bot_banca', email: 'banca', nickname: '🤖 La Banca', esBot: true });
+          // El bot juega con una bolsa FINITA. Antes pagaba ilimitadamente: cada
+          // vez que caía en "pon $1" el bote crecía sin que nadie pusiera esas
+          // monedas, y el jugador podía llevárselas como saldo real. Eso era un
+          // generador de monedas explotable en bucle.
+          sala.jugadores.push({
+              id: 'bot_banca', email: 'banca', nickname: '🤖 La Banca', esBot: true,
+              bolsa: monto * TOPE_BANCA_POR_MESA
+          });
           sala.bote += monto;
+          registrarEmisionBanca(monto, 'Ante de la banca en Pirinola');
       }
 
       socket.emit('sala-encontrada', sala); // Envía info de sala al cliente
@@ -1904,16 +1981,43 @@ io.on('connection', (socket) => {
   }
 
   async function cobrarPirinola(jugador, cantidad, sala) {
-      sala.bote += cantidad;
-      if (!jugador.esBot) {
-          const userRef = db.collection('usuarios').doc(jugador.email);
-          await userRef.update({ monedas: admin.firestore.FieldValue.increment(-cantidad) });
+      // El bot paga de su bolsa finita. Si se le acaba, no pone: el bote
+      // simplemente no crece. Antes ponía sin límite y sin respaldo.
+      if (jugador.esBot) {
+          const puede = Math.min(cantidad, jugador.bolsa || 0);
+          jugador.bolsa = (jugador.bolsa || 0) - puede;
+          sala.bote += puede;
+          if (puede > 0) registrarEmisionBanca(puede, 'Aporte de la banca en Pirinola');
+          return;
       }
+
+      // Al jugador real solo se le cobra lo que tiene. Antes se descontaba sin
+      // mirar el saldo, así que con la cara de "todos ponen" una cuenta podía
+      // quedarse en números rojos.
+      try {
+          const userRef = db.collection('usuarios').doc(jugador.email);
+          let cobrado = 0;
+          await db.runTransaction(async (tx) => {
+              const doc = await tx.get(userRef);
+              if (!doc.exists) return;
+              const saldo = doc.data().monedas || 0;
+              cobrado = Math.min(cantidad, saldo);
+              if (cobrado > 0) tx.update(userRef, { monedas: saldo - cobrado });
+          });
+          sala.bote += cobrado;
+      } catch (e) { console.error("Error cobrando pirinola:", e); }
   }
 
   async function pagarPirinola(jugador, cantidad, sala, concepto) {
       const pago = Math.min(cantidad, sala.bote);
       sala.bote -= pago;
+      // Lo que se lleva el bot vuelve a su bolsa y se descuenta de la emisión:
+      // así el contador refleja lo que la banca realmente puso, no lo que pasó
+      // por el bote.
+      if (jugador.esBot && pago > 0) {
+          jugador.bolsa = (jugador.bolsa || 0) + pago;
+          registrarEmisionBanca(-pago, 'La banca recupera bote de Pirinola');
+      }
       if (!jugador.esBot && pago > 0) {
           const userRef = db.collection('usuarios').doc(jugador.email);
           await userRef.update({ monedas: admin.firestore.FieldValue.increment(pago) });
