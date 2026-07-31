@@ -46,6 +46,7 @@ npm start          # → http://localhost:3000
 | `ADMIN_EMAIL` | Email de la cuenta administradora. Si no se define, cae a `admin@loteria.com` |
 | `JWT_SECRET` | **Importante.** Llave para firmar los tokens de sesión. Sin ella se genera una temporal y los tokens dejan de valer en cada reinicio |
 | `AUTH_ESTRICTA` | `true` cierra el camino sin token. Ver abajo |
+| `ORIGENES_EXTRA` | Dominios adicionales permitidos por CORS, separados por comas |
 | `STRIPE_WEBHOOK_SECRET` | Secreto de firma del webhook (`whsec_...`). Sin él los pagos solo se acreditan si el navegador vuelve |
 | `PORT` | Puerto (Render lo inyecta; por defecto `3000`) |
 
@@ -101,6 +102,8 @@ node --check server.js
 | `POST` | `/api/admin/recargar-manual` | Abono manual de monedas |
 | `POST` | `/api/admin/banear` | Banear / desbanear |
 | `POST` | `/api/admin/broadcast` | Push masivo vía FCM |
+| `GET` | `/api/admin/uso-heredado` | Peticiones que aún llegan sin token, por ruta |
+| `POST` | `/api/admin/migrar-nicknames` | Rellena el índice de unicidad. Se corre una vez |
 
 ### Hub
 | Método | Ruta | Descripción |
@@ -121,7 +124,10 @@ usuarios/{email}
   fichaActiva · cartasFavoritas[] · baneado · fcmToken · ultimaRecompensa
   └── historial/{id}   tipo · monto · descripcion · esIngreso · fecha
 
-finanzas/general       totalVentasMXN
+nicknames/{minúsculas} email · nickname     ← índice de unicidad
+pagos_procesados/{id}  email · monedas · montoMXN   ← idempotencia de Stripe
+
+finanzas/general       totalVentasMXN · monedasEmitidasBanca
 juegos_hub/{id}        titulo · url · imgPoster · descripcion · estado
 ```
 
@@ -195,10 +201,9 @@ camino viejo: pon `AUTH_ESTRICTA=true` en Render y queda cerrado.
 
 | # | Problema | Estado |
 |---|---|---|
-| 1 | `/api/buscar-destinatario` revela el email de cualquier nickname | Pendiente |
-| 2 | Sin rate limiting ni validación de entrada | Pendiente |
-| 3 | El SSO del Hub debe pasar a mandar el JWT en vez de base64 sin firmar | Pendiente en el Hub |
-| 4 | Nicknames no únicos | Pendiente |
+| 1 | `/api/buscar-destinatario` sigue devolviendo el email del destinatario | Pendiente |
+| 2 | El SSO del Hub aún manda el `sso` base64 además del token firmado | Pendiente: retirar `sso` |
+| 3 | Estado de las partidas en memoria: un redeploy tumba las activas | Pendiente |
 
 ---
 
@@ -209,7 +214,9 @@ camino viejo: pon `AUTH_ESTRICTA=true` en Render y queda cerrado.
 - **Estado en RAM**: cada redeploy tumba las partidas activas y bloquea el escalado a
   más de una instancia. Moverlo a Redis (con el adaptador de Socket.IO) resolvería
   ambas cosas.
-- **CORS abierto** (`origin: '*'`) tanto en Express como en Socket.IO.
+- **CORS restringido** a los dominios propios, en Express y en Socket.IO. Las
+  peticiones sin cabecera `Origin` (webhook de Stripe, curl, health checks) se
+  permiten. Los orígenes rechazados quedan en los logs.
 
 ---
 
@@ -218,7 +225,10 @@ camino viejo: pon `AUTH_ESTRICTA=true` en Render y queda cerrado.
 - [x] Documentar arquitectura (`CLAUDE.md`, `README.md`)
 - [x] **Autenticación JWT** + handshake de socket autenticado (en convivencia)
 - [ ] Poner `AUTH_ESTRICTA=true` cuando los contadores lleguen a cero
-- [ ] Rate limiting y validación de entrada
+- [x] Rate limiting y validación de entrada
+- [x] Nicknames únicos mediante índice en Firestore
+- [x] `crypto.randomInt()` en barajas, dados y códigos de mesa
+- [x] CORS restringido a los dominios propios
 - [x] Mover `ADMIN_EMAIL` a variable de entorno
 - [ ] Estado de salas en Redis
 - [ ] Partir `server.js` en módulos por juego

@@ -44,12 +44,43 @@ async function registrarMovimiento(email, tipo, monto, descripcion, esIngreso) {
 const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
-const io = require('socket.io')(http, { cors: { origin: '*' } });
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const bcrypt = require('bcryptjs'); 
+const bcrypt = require('bcryptjs');
 const cors = require('cors');
 
-app.use(cors());
+// ==========================================================
+// 🌐 ORÍGENES PERMITIDOS (CORS)
+// ==========================================================
+// Estaba abierto a cualquier origen. Ahora que hay sesiones de verdad conviene
+// cerrarlo, para que una web ajena no pueda llamar a esta API desde el navegador
+// de alguien que tenga la sesión abierta.
+//
+// Se amplía sin tocar código con ORIGENES_EXTRA (separados por comas), por si
+// aparece un frontend nuevo o un dominio de pruebas.
+const ORIGENES = [
+    'https://juegosenlanube.com',
+    'https://www.juegosenlanube.com',
+    'https://loteria.juegosenlanube.com',
+    'https://serpientes.juegosenlanube.com',
+    'https://pirinola.juegosenlanube.com',
+    ...(process.env.ORIGENES_EXTRA || '').split(',').map(s => s.trim()).filter(Boolean)
+];
+
+function origenPermitido(origen, cb) {
+    // Sin cabecera Origin son peticiones que no vienen de una página web: el
+    // webhook de Stripe, curl, apps nativas, los health checks de Render.
+    if (!origen) return cb(null, true);
+    if (ORIGENES.includes(origen)) return cb(null, true);
+
+    // Se registra en vez de fallar en silencio: si algún frontend legítimo se
+    // quedó fuera de la lista, aparece en los logs de Render y se añade.
+    console.warn(`🚫 Origen no permitido: ${origen}`);
+    cb(null, false);
+}
+
+const io = require('socket.io')(http, { cors: { origin: origenPermitido } });
+
+app.use(cors({ origin: origenPermitido }));
 
 // ==========================================================
 // 💳 WEBHOOK DE STRIPE
@@ -234,6 +265,21 @@ function esAdmin(email) {
 }
 
 /**
+ * Índice de nicknames para garantizar unicidad.
+ *
+ * Firestore no tiene restricciones de tipo UNIQUE, así que la unicidad se
+ * consigue con una colección aparte donde el ID del documento ES el nickname en
+ * minúsculas: crear ese documento dentro de una transacción falla si ya existe.
+ *
+ * Sin esto, dos personas podían llamarse igual, y como las transferencias se
+ * hacen por nickname, alguien podía registrarse con el nombre de un jugador
+ * conocido para que le llegara a él el dinero destinado al otro.
+ */
+function refNickname(nick) {
+    return db.collection('nicknames').doc(String(nick).trim().toLowerCase());
+}
+
+/**
  * El nickname lo escribe el usuario y se pinta en la sala de todos los demás y en
  * el panel de administración. Los frontends ya lo escapan al renderizar, pero
  * conviene que un payload de este tipo no llegue siquiera a la base de datos.
@@ -361,15 +407,31 @@ app.post('/api/registro', limiteRegistro, async (req, res) => {
         return res.status(400).json({ error: 'El nickname debe tener entre 3 y 20 caracteres, sin símbolos raros.' });
     }
     try {
-        const userRef = db.collection('usuarios').doc(email);
-        const doc = await userRef.get();
-        if (doc.exists) return res.status(400).json({ error: 'Correo ya registrado.' });
-
         const hashedPassword = await bcrypt.hash(password, 10);
-        await userRef.set({
-            email, password: hashedPassword, nickname, monedas: 20, 
-            creado: new Date(), baneado: false 
-        });
+        const userRef = db.collection('usuarios').doc(email);
+        const nickRef = refNickname(nickname);
+
+        // Correo y nickname se comprueban y reservan en la MISMA transacción.
+        // Hacerlo en dos pasos dejaba una rendija: dos registros simultáneos con
+        // el mismo nickname podían pasar los dos la comprobación antes de que
+        // ninguno escribiera.
+        try {
+            await db.runTransaction(async (tx) => {
+                const [usuario, nick] = await Promise.all([tx.get(userRef), tx.get(nickRef)]);
+                if (usuario.exists) throw new Error('CORREO_YA_EXISTE');
+                if (nick.exists) throw new Error('NICKNAME_OCUPADO');
+
+                tx.set(userRef, {
+                    email, password: hashedPassword, nickname, monedas: 20,
+                    creado: new Date(), baneado: false
+                });
+                tx.set(nickRef, { email, nickname, creado: admin.firestore.FieldValue.serverTimestamp() });
+            });
+        } catch (e) {
+            if (e.message === 'CORREO_YA_EXISTE') return res.status(400).json({ error: 'Correo ya registrado.' });
+            if (e.message === 'NICKNAME_OCUPADO') return res.status(400).json({ error: 'Ese nickname ya está en uso. Elige otro.' });
+            throw e;
+        }
 
         // 🔥 NOTIFICACIÓN PUSH AL ADMIN (Usando 'data' para evitar duplicados)
         try {
@@ -559,6 +621,71 @@ app.get('/api/admin/uso-heredado', (req, res) => {
     });
 });
 
+// Rellena el índice de nicknames con las cuentas que ya existían antes de que
+// hubiera unicidad. Se ejecuta una vez y es idempotente: repetirlo no hace daño.
+//
+// Los duplicados que YA existan no se resuelven solos: el índice se queda con la
+// cuenta más antigua y las demás se listan en la respuesta para decidir a mano.
+// Renombrarle la cuenta a alguien sin avisarle no es cosa del servidor.
+app.post('/api/admin/migrar-nicknames', async (req, res) => {
+    if (!solicitanteEsAdmin(req)) return res.status(403).json({ error: "Acceso denegado" });
+
+    try {
+        const snapshot = await db.collection('usuarios').get();
+
+        const porNickname = new Map();
+        snapshot.forEach(doc => {
+            const nick = doc.data().nickname;
+            if (!nick) return;
+            const clave = String(nick).trim().toLowerCase();
+            if (!porNickname.has(clave)) porNickname.set(clave, []);
+            porNickname.get(clave).push({
+                email: doc.id,
+                nickname: nick,
+                creado: doc.data().creado?.toDate?.() || doc.data().creado || new Date(0)
+            });
+        });
+
+        let creados = 0, yaEstaban = 0;
+        const duplicados = [];
+
+        for (const [clave, cuentas] of porNickname) {
+            cuentas.sort((a, b) => new Date(a.creado) - new Date(b.creado));
+            const dueño = cuentas[0];
+
+            if (cuentas.length > 1) {
+                duplicados.push({
+                    nickname: dueño.nickname,
+                    seQuedaCon: dueño.email,
+                    enConflicto: cuentas.slice(1).map(c => c.email)
+                });
+            }
+
+            const ref = db.collection('nicknames').doc(clave);
+            if ((await ref.get()).exists) { yaEstaban++; continue; }
+
+            await ref.set({
+                email: dueño.email, nickname: dueño.nickname,
+                creado: admin.firestore.FieldValue.serverTimestamp(),
+                migrado: true
+            });
+            creados++;
+        }
+
+        console.log(`🔤 Índice de nicknames: ${creados} creados, ${yaEstaban} ya estaban, ${duplicados.length} en conflicto.`);
+        res.json({
+            success: true,
+            usuariosRevisados: snapshot.size,
+            nicknamesCreados: creados,
+            yaEstaban,
+            duplicados
+        });
+    } catch (e) {
+        console.error("Error migrando nicknames:", e);
+        res.status(500).json({ error: "Error en la migración" });
+    }
+});
+
 // Stats Generales (VENTAS REALES vs DEUDA)
 app.get('/api/admin/stats', async (req, res) => {
     if (!solicitanteEsAdmin(req)) return res.status(403).json({ error: "Acceso denegado" });
@@ -637,48 +764,39 @@ app.post('/api/admin/recargar-manual', async (req, res) => {
 // 1. BUSCAR DESTINATARIO (MODO FLEXIBLE: IGNORA MAYÚSCULAS)
 app.post('/api/buscar-destinatario', limiteBusqueda, async (req, res) => {
     const { nickname } = req.body;
-    
     if (!nickname) return res.status(400).json({ error: "Falta nickname" });
 
-    // 1. Limpiamos lo que escribió el usuario (minúsculas y sin espacios extra)
-    const busqueda = nickname.trim().toLowerCase();
-    
-    console.log(`🔍 Buscando (flexible): "${busqueda}"`);
+    const busqueda = String(nickname).trim().toLowerCase();
 
     try {
-        // NOTA: Para apps enormes esto no es lo más eficiente, pero para tu Hub 
-        // con cientos/miles de usuarios funciona PERFECTO y sin errores.
-        const snapshot = await db.collection('usuarios').get();
-        
-        let usuarioEncontrado = null;
+        // Lectura directa por ID en el índice. Antes esto descargaba la colección
+        // completa de usuarios y la recorría en memoria en CADA búsqueda: lento,
+        // caro en lecturas de Firestore, y además se quedaba con el ÚLTIMO que
+        // coincidiera, sin avisar de que hubiera varios con el mismo nombre.
+        const doc = await refNickname(busqueda).get();
 
-        // Revisamos uno por uno
-        snapshot.forEach(doc => {
-            const data = doc.data();
-            if (data.nickname) {
-                // Comparamos peras con peras (todo en minúsculas)
-                const nickDb = data.nickname.trim().toLowerCase();
-                
-                if (nickDb === busqueda) {
-                    usuarioEncontrado = {
-                        email: doc.id,
-                        nickname: data.nickname, // Regresamos el original bonito
-                        avatar: data.avatar
-                    };
-                }
+        if (doc.exists) {
+            const d = doc.data();
+            return res.json({ success: true, destinatario: { email: d.email, nickname: d.nickname } });
+        }
+
+        // Respaldo para cuentas que aún no están en el índice (creadas antes de
+        // que existiera). Se puede retirar cuando la migración esté hecha.
+        const snapshot = await db.collection('usuarios').get();
+        let encontrado = null;
+        snapshot.forEach(u => {
+            const data = u.data();
+            if (data.nickname && data.nickname.trim().toLowerCase() === busqueda) {
+                encontrado = { email: u.id, nickname: data.nickname };
             }
         });
 
-        if (usuarioEncontrado) {
-            console.log("✅ Encontrado:", usuarioEncontrado.nickname);
-            return res.json({ 
-                success: true, 
-                destinatario: usuarioEncontrado 
-            });
-        } else {
-            console.log("❌ No encontrado en", snapshot.size, "usuarios.");
-            return res.json({ success: false, error: "Usuario no encontrado" });
+        if (encontrado) {
+            console.log(`⚠️ "${busqueda}" resuelto por barrido: falta migrar al índice.`);
+            return res.json({ success: true, destinatario: encontrado });
         }
+
+        return res.json({ success: false, error: "Usuario no encontrado" });
 
     } catch (e) {
         console.error("Error buscar destinatario:", e);
@@ -850,9 +968,38 @@ app.post('/api/actualizar-perfil', async (req, res) => {
         return res.status(400).json({ error: "El nickname debe tener entre 3 y 20 caracteres, sin símbolos raros." });
     }
     try {
-        await db.collection('usuarios').doc(email).update({ nickname: nickname, avatar: avatar || 'assets/avatar.png' });
+        const userRef = db.collection('usuarios').doc(email);
+        const nuevoNickRef = refNickname(nickname);
+
+        await db.runTransaction(async (tx) => {
+            const [usuario, nick] = await Promise.all([tx.get(userRef), tx.get(nuevoNickRef)]);
+            if (!usuario.exists) throw new Error('NO_EXISTE');
+
+            const anterior = usuario.data().nickname;
+            const cambiaDeNombre = String(anterior || '').trim().toLowerCase() !== String(nickname).trim().toLowerCase();
+
+            // Si el nickname ya lo tiene otra persona, se rechaza. Que lo tengas
+            // tú mismo (por ejemplo al cambiar solo el avatar) no es conflicto.
+            if (cambiaDeNombre && nick.exists && nick.data().email !== email) {
+                throw new Error('NICKNAME_OCUPADO');
+            }
+
+            tx.update(userRef, { nickname, avatar: avatar || 'assets/avatar.png' });
+
+            if (cambiaDeNombre) {
+                // Se libera el anterior para que quede disponible.
+                if (anterior) tx.delete(refNickname(anterior));
+                tx.set(nuevoNickRef, { email, nickname, creado: admin.firestore.FieldValue.serverTimestamp() });
+            }
+        });
+
         res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: "Error al actualizar perfil" }); }
+    } catch (error) {
+        if (error.message === 'NICKNAME_OCUPADO') return res.status(400).json({ error: "Ese nickname ya está en uso. Elige otro." });
+        if (error.message === 'NO_EXISTE') return res.status(404).json({ error: "Usuario no encontrado" });
+        console.error("Error perfil:", error);
+        res.status(500).json({ error: "Error al actualizar perfil" });
+    }
 });
 
 // --- STRIPE (CON REGISTRO DE FINANZAS) ---
@@ -1006,6 +1153,16 @@ async function procesarReembolsoPorSalida(salaId, socketId) {
     }
 }
 
+// ==================== ALEATORIEDAD ====================
+// Math.random() en V8 usa xorshift128+, que NO es criptográficamente seguro:
+// observando suficientes resultados se puede reconstruir su estado interno y
+// predecir los siguientes. Aquí eso decide barajas, dados y códigos de mesa en
+// un juego con dinero real, así que va con el generador del sistema.
+const { randomInt } = require('crypto');
+
+/** Entero al azar en [0, tope). */
+const alAzar = (tope) => randomInt(tope);
+
 // ==================== CONFIGURACIÓN DE MODOS ====================
 const MODOS_JUEGO = {
     // OJO con la terminología, que se presta a confusión:
@@ -1029,13 +1186,13 @@ function mezclarBaraja() {
     // 2. Algoritmo Fisher-Yates (Aleatoriedad Real)
     // Recorremos el mazo de atrás para adelante e intercambiamos con una posición al azar
     for (let i = cartas.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = alAzar(i + 1);
         [cartas[i], cartas[j]] = [cartas[j], cartas[i]];
     }
 
     // 3. "Cortar" la baraja (Toque extra para romper patrones psicológicos)
     // Cortamos el mazo en un punto aleatorio y pasamos lo de arriba para abajo
-    const puntoCorte = Math.floor(Math.random() * (cartas.length - 10)) + 5;
+    const puntoCorte = alAzar(cartas.length - 10) + 5;
     const arriba = cartas.slice(0, puntoCorte);
     const abajo = cartas.slice(puntoCorte);
 
@@ -1618,7 +1775,7 @@ io.on('connection', (socket) => {
       await registrarMovimiento(email, 'apuesta', monto, 'Crear Mesa Serpientes', false);
       socket.emit('usuario-actualizado', (await userRef.get()).data());
 
-      const codigo = Math.floor(1000 + Math.random() * 9000).toString();
+      const codigo = (1000 + alAzar(9000)).toString();
       const salaId = `privada_s_${codigo}`;
 
       salasSerpientes[salaId] = {
@@ -1712,7 +1869,7 @@ io.on('connection', (socket) => {
       // posición 0, que contra la CPU era siempre el humano; en serpientes y
       // escaleras tirar primero es una ventaja medible, así que contra la banca
       // el juego no era una moneda al aire.
-      sala.turnoIndex = Math.floor(Math.random() * sala.jugadores.length);
+      sala.turnoIndex = alAzar(sala.jugadores.length);
       io.to(sala.id).emit('inicio-partida-serpientes', { salaId: sala.id, jugadores: sala.jugadores });
       io.to(sala.id).emit('turno-asignado', sala.jugadores[sala.turnoIndex].nickname);
 
@@ -1757,7 +1914,7 @@ io.on('connection', (socket) => {
       const jugadorActual = sala.jugadores[sala.turnoIndex];
       if (!jugadorActual.esBot && jugadorActual.id !== solicitanteId) return;
 
-      const dado = Math.floor(Math.random() * 6) + 1;
+      const dado = alAzar(6) + 1;
       let nuevaPos = jugadorActual.posicion + dado;
 
       if (nuevaPos > 54) { nuevaPos = 54 - (nuevaPos - 54); }
@@ -1872,7 +2029,7 @@ io.on('connection', (socket) => {
       socket.emit('usuario-actualizado', (await userRef.get()).data());
 
       // Generar Código 4 Dígitos
-      const codigo = Math.floor(1000 + Math.random() * 9000).toString();
+      const codigo = (1000 + alAzar(9000)).toString();
       const salaId = `privada_${codigo}`;
 
       salasPirinola[salaId] = {
@@ -1975,7 +2132,7 @@ io.on('connection', (socket) => {
   function iniciarJuegoReal(sala) {
       sala.enJuego = true;
       io.to(sala.id).emit('notificacion', '¡Juego Iniciado!');
-      sala.turnoIndex = Math.floor(Math.random() * sala.jugadores.length); 
+      sala.turnoIndex = alAzar(sala.jugadores.length); 
       io.to(sala.id).emit('juego-arrancado', sala); // Evento especial para quitar botones de espera
       io.to(sala.id).emit('actualizar-estado-pirinola', sala);
       verificarTurnoBot(sala);
@@ -1991,7 +2148,7 @@ io.on('connection', (socket) => {
       const jugador = sala.jugadores[sala.turnoIndex];
       if (solicitanteId !== 'sistema' && jugador.id !== solicitanteId) return;
 
-      const resultado = Math.floor(Math.random() * 6) + 1; 
+      const resultado = alAzar(6) + 1; 
       io.to(salaId).emit('resultado-giro', { cara: resultado });
 
       setTimeout(async () => {
