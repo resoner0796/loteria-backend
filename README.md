@@ -57,6 +57,7 @@ npm start          # → http://localhost:3000
 | `JWT_SECRET` | **Importante.** Llave para firmar los tokens de sesión. Sin ella se genera una temporal y los tokens dejan de valer en cada reinicio |
 | `AUTH_ESTRICTA` | `true` cierra el camino sin token. Ver abajo |
 | `ORIGENES_EXTRA` | Dominios adicionales permitidos por CORS, separados por comas |
+| `PERMITIR_LOCALHOST` | `true` añade los servidores locales a CORS, para probar los frontends sin desplegar |
 | `STRIPE_WEBHOOK_SECRET` | Secreto de firma del webhook (`whsec_...`). Sin él los pagos solo se acreditan si el navegador vuelve |
 | `PORT` | Puerto (Render lo inyecta; por defecto `3000`) |
 

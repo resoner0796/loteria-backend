@@ -116,6 +116,17 @@ const ORIGENES = [
     ...(process.env.ORIGENES_EXTRA || '').split(',').map(s => s.trim()).filter(Boolean)
 ];
 
+// Servidores locales, para poder probar los frontends contra este backend sin
+// tener que desplegar. Al cerrar CORS dejaron de funcionar y no es evidente por
+// qué: el navegador solo dice que falló la petición.
+if (process.env.PERMITIR_LOCALHOST === 'true') {
+    ORIGENES.push(
+        'http://localhost:8000', 'http://localhost:8123', 'http://localhost:3000',
+        'http://127.0.0.1:8000', 'http://127.0.0.1:8123'
+    );
+    console.log('🔓 CORS abierto también a localhost (PERMITIR_LOCALHOST=true)');
+}
+
 function origenPermitido(origen, cb) {
     // Sin cabecera Origin son peticiones que no vienen de una página web: el
     // webhook de Stripe, curl, apps nativas, los health checks de Render.
@@ -1092,7 +1103,12 @@ app.post('/api/crear-orden', async (req, res) => {
             }],
             mode: 'payment',
             metadata: { email_usuario: email, monedas_a_dar: cantidad, origen_pago: origen || 'loteria' },
-            return_url: `${BACKEND_URL}/api/confirmar-pago?session_id={CHECKOUT_SESSION_ID}`,
+            // El origen viaja también en la URL de retorno, no solo en los
+            // metadatos: si la sesión termina sin pagarse o algo falla, no
+            // tenemos de dónde sacarlo y hay que saber a qué frontend devolver
+            // a la persona. Antes esos dos casos mandaban siempre al Hub, así
+            // que pagar desde la Lotería y cerrar el checkout te sacaba de ahí.
+            return_url: `${BACKEND_URL}/api/confirmar-pago?session_id={CHECKOUT_SESSION_ID}&origen=${encodeURIComponent(origen || 'loteria')}`,
         });
         res.json({ clientSecret: session.client_secret });
     } catch (error) { res.status(500).json({ error: "Error orden" }); }
@@ -1188,6 +1204,10 @@ async function acreditarPago(session, origenLlamada) {
 app.get('/api/confirmar-pago', async (req, res) => {
     const { session_id } = req.query;
 
+    // De dónde salió el pago. Se usa para devolver a la persona al mismo sitio
+    // pase lo que pase, incluso si no llegamos a leer la sesión de Stripe.
+    const volverA = (req.query.origen === 'hub') ? FRONTEND_HUB : FRONTEND_LOTERIA;
+
     try {
         const session = await stripe.checkout.sessions.retrieve(session_id);
 
@@ -1196,10 +1216,10 @@ app.get('/api/confirmar-pago', async (req, res) => {
             const destino = r.origen === 'hub' ? FRONTEND_HUB : FRONTEND_LOTERIA;
             return res.redirect(`${destino}/index.html?pago=exito&cantidad=${r.monedasExtra}`);
         }
-        res.redirect(`${FRONTEND_HUB}/index.html?pago=cancelado`);
+        res.redirect(`${volverA}/index.html?pago=cancelado`);
     } catch (error) {
         console.error(error);
-        res.redirect(`${FRONTEND_HUB}/index.html?pago=error`);
+        res.redirect(`${volverA}/index.html?pago=error`);
     }
 });
 
