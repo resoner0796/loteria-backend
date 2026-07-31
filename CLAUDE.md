@@ -8,21 +8,43 @@ Un **único proceso Node** que da servicio a todo el ecosistema *Juegos en la Nu
 Lotería, Serpientes y Escaleras, Pirinola y la API del Hub. Expone una API REST
 (`/api/*`) y un servidor Socket.IO en el mismo puerto.
 
-Son literalmente **dos archivos**: `server.js` (~1,760 líneas) y `package.json`.
+Son literalmente **dos archivos**: `server.js` (~2,200 líneas) y `package.json`.
 No hay carpetas, módulos, tests ni build.
 
 Corre en **Render**: <https://loteria-backend-3nde.onrender.com>
 
-## Los dos repos
+## El ecosistema: cinco repos
 
-| Repo | Contenido | Deploy | Ruta local |
+| Repo | Rol | Producción | Ruta local |
 |---|---|---|---|
-| `resoner0796/loteria-backend` | Este. `server.js` | Render (auto en push a `main`) | `~/loteria-backend-repo` |
-| `resoner0796/CARTAS-LOTERIA-` | Frontend de Lotería | Vercel (auto en push a `main`) | `~/CARTAS-LOTERIA--1` |
+| `loteria-backend` | Este. **Backend** de todos los juegos | loteria-backend-3nde.onrender.com | `~/loteria-backend-repo` |
+| `juegosenalnube` | **Hub**: el único con login | www.juegosenlanube.com | `~/juegosenalnube` |
+| `CARTAS-LOTERIA-` | Lotería mexicana | loteria.juegosenlanube.com | `~/CARTAS-LOTERIA--1` |
+| `Serpientesyescaleras` | Serpientes y Escaleras | serpientes.juegosenlanube.com | `~/Serpientesyescaleras` |
+| `Pirinola-Online` | Pirinola | pirinola.juegosenlanube.com | `~/Pirinola-Online` |
 
-**Casi cualquier cambio de comportamiento toca los dos repos.** Antes de renombrar un
-evento de socket o cambiar el shape de una respuesta, revisa
-`~/CARTAS-LOTERIA--1/js/app.js`.
+```
+        HUB (login, monedero, catálogo)
+                 │  reparte el token en la URL (?tk=...)
+   ┌─────────────┼─────────────┐
+LOTERÍA     SERPIENTES     PIRINOLA
+   └─────────────┼─────────────┘
+                 ▼
+       ESTE SERVIDOR (Render): Socket.IO + /api/*
+                 │
+            FIRESTORE · STRIPE · FCM
+```
+
+**Este repo es el único con estado compartido.** Un cambio aquí puede afectar a
+los cuatro frontends a la vez: antes de renombrar un evento de socket o cambiar el
+shape de una respuesta, revisa quién lo consume.
+
+| Bloque de `server.js` | Lo consume |
+|---|---|
+| `--- LOTERIA ---` | `~/CARTAS-LOTERIA--1/js/app.js` |
+| `🐍 BLOQUE SERPIENTES Y ESCALERAS` | `~/Serpientesyescaleras/game.js` |
+| `🌀 BLOQUE PIRINOLA ROYAL` | `~/Pirinola-Online/js/app.js` |
+| `--- HUB & JUEGOS API ---`, admin, pagos | `~/juegosenalnube/hub.js` |
 
 > ⚠️ `~/Desktop/loteria-backend` es un clon obsoleto congelado en agosto 2025
 > (`server.js` de 70 líneas). **No trabajar ahí.** Un push desde esa carpeta destruiría
@@ -36,8 +58,12 @@ evento de socket o cambiar el shape de una respuesta, revisa
 | **Stripe** | Pagos reales en MXN | env `STRIPE_SECRET_KEY` |
 | **FCM** (`firebase-admin/messaging`) | Notificaciones push | mismo service account |
 | **node-cron** | Recordatorio de regalo diario, 18:00 | — |
+| **jsonwebtoken** | Sesiones firmadas | env `JWT_SECRET` |
+| **express-rate-limit** | Límites por IP | requiere `app.set('trust proxy', 1)` |
 
-`PORT` lo inyecta Render.
+Variables de entorno: `nicknames`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+`JWT_SECRET`, `ADMIN_EMAIL`, `AUTH_ESTRICTA`, `ORIGENES_EXTRA`. `PORT` lo inyecta
+Render.
 
 > El nombre de la variable `nicknames` para el service account de Firebase es
 > confuso pero es el que está en producción. No renombrar sin actualizar Render primero.
@@ -53,7 +79,11 @@ usuarios/{email}                     ← el email ES el ID del documento
   ├── baneado, fcmToken, ultimaRecompensa, creado
   └── historial/{auto}    tipo, monto, descripcion, esIngreso, fecha
 
-finanzas/general          totalVentasMXN, ultimaActualizacion
+nicknames/{minúsculas}    email, nickname       ← índice de UNICIDAD
+pagos_procesados/{id}     email, monedas, montoMXN, acreditadoPor
+                                                ← idempotencia de Stripe
+
+finanzas/general          totalVentasMXN, monedasEmitidasBanca, ultimaActualizacion
 juegos_hub/{auto}         titulo, url, imgPoster, descripcion, estado
 ```
 
@@ -61,6 +91,12 @@ Notas:
 - Que el email sea el ID hace imposible cambiar de correo sin migrar el documento.
 - `historial` es subcolección: se consulta por usuario, nunca globalmente.
 - Las fechas se guardan en UTC y se formatean a `America/Mexico_City` al leerlas.
+- Firestore no tiene `UNIQUE`: la unicidad de nicknames se consigue con la colección
+  `nicknames`, donde el ID del documento ES el nickname en minúsculas. Reservarlo
+  dentro de una transacción falla si ya existe.
+- `pagos_procesados` hace idempotente la acreditación de Stripe: el `session_id` se
+  reserva ANTES de tocar ningún saldo, así que da igual si llegan el webhook y el
+  retorno del navegador.
 
 ## Estado en memoria
 
@@ -78,14 +114,20 @@ adaptador de Redis para Socket.IO).
 
 ```js
 MODOS_JUEGO = {
-  tradicional: { costo: 1, cartasJugador: 54 },
-  llena:       { costo: 2, cartasJugador: 54 },
-  pozo:        { costo: 2, cartasJugador: 20 },
+  tradicional: { costo: 1, tablasDisponibles: 53 },
+  llena:       { costo: 2, tablasDisponibles: 53 },
+  pozo:        { costo: 2, tablasDisponibles: 20 },
 }
 ```
 
-La baraja que se canta **siempre es de 54**, sin importar el modo. `mezclarBaraja()`
-usa Fisher-Yates más un "corte" aleatorio.
+⚠️ **No confundas los dos conjuntos**, es la trampa más fácil del proyecto:
+- **Tabla** = lo que elige el jugador. Hay **53**.
+- **Carta** = lo que se canta. La baraja es de **54**, con una voz por cada una.
+
+La baraja que se canta siempre es de 54, sin importar el modo. `mezclarBaraja()`
+usa Fisher-Yates más un "corte", con `crypto.randomInt()`: **nunca uses
+`Math.random()` para nada que decida dinero**, es predecible observando
+suficientes resultados.
 
 1. `unirse-sala` — crea la sala si no existe; el creador queda como `hostId`.
    Responde `rol-asignado` + `info-sala`.
@@ -120,28 +162,47 @@ usa Fisher-Yates más un "corte" aleatorio.
   el saldo a mano.**
 - Los errores de push (FCM) se loguean pero **no** deben tumbar la petición principal.
 
-## ⚠️ Seguridad — deuda crítica
+## 🔑 Autenticación — LÉELO ANTES DE TOCAR NADA
 
-**No hay autenticación.** El servidor confía en el email que venga en el body o en un
-header. Con dinero real de por medio (Stripe live), estos son huecos explotables:
+El login y el registro emiten un **JWT firmado** (30 días). El cliente lo manda en
+`Authorization: Bearer` y en el `auth` del handshake de Socket.IO.
 
-1. **Vaciado de cuentas.** `/api/buscar-destinatario` devuelve el email de cualquier
-   nickname; `/api/transferir-saldo` acepta `origenEmail` del body sin verificar que
-   quien llama sea el dueño. Cadena completa de dos peticiones.
-2. **Monedas infinitas.** Los `/api/admin/*` se autorizan comparando el header
-   `admin-email` (o `adminEmail` del body) contra la constante `ADMIN_EMAIL`, que
-   además está hardcodeada en el `app.js` público del frontend.
-3. **Fuga de datos.** `/api/admin/usuarios` expone la lista completa de usuarios con
-   el mismo header trivial.
-4. **SSO falsificable.** El Hub pasa el usuario como JSON en base64 sin firmar.
-5. Los eventos de socket (`comprar-item`, `apostar`, `entrar-serpientes`) toman el
-   email del payload del cliente sin verificar identidad.
-6. `/api/registro` no valida fuerza de contraseña ni formato de email, y no hay rate
-   limiting en ningún endpoint.
+**Regla de oro: la identidad sale SIEMPRE del token, nunca del body.**
 
-**Dirección acordada:** JWT firmado emitido en `/api/login`, leído del header
-`Authorization`, más un handshake autenticado en Socket.IO. Al implementarlo hay que
-desplegar backend y frontend de forma coordinada.
+- En rutas HTTP: `identificar(req, emailDeclarado, etiqueta)`
+- En eventos de socket: `emailDeSocket(socket, emailDeclarado, etiqueta)`
+- Para admin: `solicitanteEsAdmin(req)`
+
+Si añades un endpoint o evento que toque saldo o datos de un usuario, **tiene que
+pasar por uno de esos tres**. Aceptar un email del cuerpo de la petición fue
+exactamente el fallo que permitía vaciarle la cuenta a cualquiera.
+
+`AUTH_ESTRICTA=true` está **activo en producción**: sin token, esas funciones
+devuelven `null` y la petición se rechaza. El modo permisivo existió solo durante
+la migración; los contadores de `/api/admin/uso-heredado` sirvieron para saber
+cuándo era seguro cerrarlo.
+
+### Otras defensas en su sitio
+
+- **Rate limiting** por IP: login 10/15 min, registro 5/h, búsqueda 40/15 min,
+  techo general 200/min. Requiere `trust proxy` porque Render va detrás del suyo.
+- **CORS** restringido a los dominios propios, en Express **y** en Socket.IO. Ojo:
+  un WebSocket no está sujeto a la política de mismo origen, así que la opción
+  `cors` de Socket.IO no basta y hace falta `allowRequest`.
+- **Pagos idempotentes** y webhook con verificación de firma.
+- **Nickname validado** en registro y cambio de perfil.
+- `process.on('unhandledRejection')` como red de seguridad: los handlers `async`
+  de socket sin `try/catch` podían tumbar el proceso entero con un payload
+  malformado, y con él todas las partidas activas.
+
+### Lo que sigue pendiente
+
+- `/api/buscar-destinatario` devuelve el email del destinatario.
+- El estado de las partidas vive en RAM: un redeploy tumba las activas.
+- Sin validación de fuerza de contraseña.
+
+Hay una auditoría completa en `~/CARTAS-LOTERIA--1/AUDITORIA-SEGURIDAD.md`
+(ignorada por git a propósito).
 
 ## Referencia de eventos Socket.IO
 

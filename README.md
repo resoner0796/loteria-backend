@@ -18,13 +18,23 @@ Un único proceso Node que atiende, en el mismo puerto:
   turnos de dados y contadores de jugadores en vivo.
 
 ```
-   FRONTENDS (Vercel)                    ESTE SERVIDOR (Render)
-   ├── loteria.juegosenlanube.com  ───►  ├── REST /api/*
-   ├── juegosenlanube.com (Hub)          └── Socket.IO
-   └── serpientes / pirinola                     │
-                                    ┌────────────┼────────────┐
-                                FIRESTORE     STRIPE        FCM
+   FRONTENDS (Vercel)                      ESTE SERVIDOR (Render)
+   ├── www.juegosenlanube.com  (Hub)  ──►  ├── REST /api/*
+   ├── loteria.juegosenlanube.com          └── Socket.IO
+   ├── serpientes.juegosenlanube.com               │
+   └── pirinola.juegosenlanube.com    ┌────────────┼────────────┐
+                                  FIRESTORE     STRIPE        FCM
 ```
+
+### Los cinco repos
+
+| Repo | Rol |
+|---|---|
+| **`loteria-backend`** | **Este.** Backend común |
+| [`juegosenalnube`](https://github.com/resoner0796/juegosenalnube) | Hub: login, monedero, catálogo |
+| [`CARTAS-LOTERIA-`](https://github.com/resoner0796/CARTAS-LOTERIA-) | Lotería mexicana |
+| [`Serpientesyescaleras`](https://github.com/resoner0796/Serpientesyescaleras) | Serpientes y Escaleras |
+| [`Pirinola-Online`](https://github.com/resoner0796/Pirinola-Online) | Pirinola |
 
 El repo tiene **dos archivos**: `server.js` y `package.json`.
 
