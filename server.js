@@ -140,6 +140,20 @@ function esAdmin(email) {
     return typeof email === 'string' && email.trim().toLowerCase() === ADMIN_EMAIL;
 }
 
+/**
+ * El nickname lo escribe el usuario y se pinta en la sala de todos los demás y en
+ * el panel de administración. Los frontends ya lo escapan al renderizar, pero
+ * conviene que un payload de este tipo no llegue siquiera a la base de datos.
+ * Se permiten letras con acentos y ñ, números, espacios y separadores simples,
+ * porque hay nicknames legítimos como "La Gata".
+ */
+function nicknameValido(nick) {
+    if (typeof nick !== 'string') return false;
+    const limpio = nick.trim();
+    if (limpio.length < 3 || limpio.length > 20) return false;
+    return /^[\p{L}\p{N} ._-]+$/u.test(limpio);
+}
+
 
 
 // ==========================================
@@ -250,6 +264,9 @@ app.get('/', (req, res) => res.send('Servidor Juegos en la Nube ☁️ Funcionan
 // 1. REGISTRO
 app.post('/api/registro', async (req, res) => {
     const { email, password, nickname } = req.body;
+    if (!nicknameValido(nickname)) {
+        return res.status(400).json({ error: 'El nickname debe tener entre 3 y 20 caracteres, sin símbolos raros.' });
+    }
     try {
         const userRef = db.collection('usuarios').doc(email);
         const doc = await userRef.get();
@@ -736,7 +753,9 @@ app.post('/api/actualizar-perfil', async (req, res) => {
     const { nickname, avatar } = req.body;
     const email = identificar(req, req.body.email, 'POST /actualizar-perfil');
     if (!email) return res.status(401).json({ error: "Sesión no válida" });
-    if (!nickname) return res.status(400).json({ error: "Faltan datos" });
+    if (!nicknameValido(nickname)) {
+        return res.status(400).json({ error: "El nickname debe tener entre 3 y 20 caracteres, sin símbolos raros." });
+    }
     try {
         await db.collection('usuarios').doc(email).update({ nickname: nickname, avatar: avatar || 'assets/avatar.png' });
         res.json({ success: true });
@@ -893,9 +912,17 @@ async function procesarReembolsoPorSalida(salaId, socketId) {
 
 // ==================== CONFIGURACIÓN DE MODOS ====================
 const MODOS_JUEGO = {
-    'tradicional': { costo: 1, cartasJugador: 54 },
-    'llena':       { costo: 2, cartasJugador: 54 },
-    'pozo':        { costo: 2, cartasJugador: 20 } 
+    // OJO con la terminología, que se presta a confusión:
+    //   - "tabla"  = lo que elige el jugador (assets/imagenes/cartas/, 53 en total)
+    //   - "carta"  = lo que se canta (assets/imagenes/barajas/, 54 en total)
+    // Son dos conjuntos distintos: hay 53 tablas y una baraja de 54 cartas.
+    //
+    // `tablasDisponibles` es informativo: hoy no lo lee nadie, el conteo real lo
+    // hace el frontend al pintar el grid de selección. Se deja documentado para
+    // que el número correcto viva junto a la definición del modo.
+    'tradicional': { costo: 1, tablasDisponibles: 53 },
+    'llena':       { costo: 2, tablasDisponibles: 53 },
+    'pozo':        { costo: 2, tablasDisponibles: 20 }
 };
 
 // Función baraja SIEMPRE 54 (No importa el modo)
