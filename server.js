@@ -340,6 +340,24 @@ const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
 // indefinidamente.
 const TOPE_BANCA_POR_MESA = 3;
 
+/**
+ * Paquetes de monedas, con su precio en pesos. ESTA es la única lista válida.
+ *
+ * Antes el navegador mandaba `cantidad` y `precio` en el cuerpo y el servidor los
+ * usaba tal cual: uno era lo que Stripe cobraba y el otro lo que se acreditaba
+ * después. Nada impedía pedir 100.000 monedas por un peso — el cobro salía
+ * legítimo, y la acreditación hacía el resto porque la cifra viajaba en los
+ * metadatos de la propia sesión de pago.
+ *
+ * El cliente ahora solo dice QUÉ paquete quiere. El precio sale de aquí y de
+ * ningún otro sitio.
+ */
+const PAQUETES_MONEDAS = {
+    50: 29.99,
+    150: 79.99,
+    500: 199.99
+};
+
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || "admin@loteria.com").trim().toLowerCase();
 
 function esAdmin(email) {
@@ -1119,9 +1137,20 @@ const FRONTEND_HUB = "https://juegosenlanube.com";
 const BACKEND_URL = "https://loteria-backend-3nde.onrender.com";
 
 app.post('/api/crear-orden', async (req, res) => {
-    const { cantidad, precio, origen } = req.body;
+    const { origen } = req.body;
     const email = identificar(req, req.body.email, 'POST /crear-orden');
     if (!email) return res.status(401).json({ error: "Sesión no válida" });
+
+    // El precio NO se lee del cuerpo: sale del catálogo del servidor. Si la
+    // cantidad pedida no es uno de los paquetes que vendemos, no hay orden.
+    // `req.body.precio` puede seguir llegando de clientes viejos; se ignora.
+    const cantidad = parseInt(req.body.cantidad, 10);
+    const precio = PAQUETES_MONEDAS[cantidad];
+    if (!precio) {
+        console.warn(`⚠️ Orden rechazada: paquete inexistente (${req.body.cantidad}) pedido por ${email}`);
+        return res.status(400).json({ error: "Paquete no válido" });
+    }
+
     try {
         const session = await stripe.checkout.sessions.create({
             ui_mode: 'embedded',
