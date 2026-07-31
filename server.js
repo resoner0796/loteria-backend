@@ -1324,19 +1324,28 @@ io.on('connection', (socket) => {
         modoJuego: modoSeleccionado,
         costoCarta: config.costo, 
         
-        reclamantes: [], 
-        validandoEmpate: false, 
-        timerEmpate: null
+        reclamantes: [],
+        validandoEmpate: false,
+        timerEmpate: null,
+        silenciados: []
       };
       socket.emit('rol-asignado', { host: true });
     } else {
       socket.emit('rol-asignado', { host: (socket.id === salas[sala].hostId) });
     }
 
+    // Si esta consulta falla, el jugador NO debe quedarse fuera de la sala: antes
+    // el await sin proteger abortaba el resto del handler y la persona aparecía
+    // conectada pero invisible para todos, sin ningún error a la vista. Se entra
+    // con el saldo por defecto y el siguiente 'usuario-actualizado' lo corrige.
     let monedasIniciales = 20;
-    if(email) {
-        const d = await db.collection('usuarios').doc(email).get();
-        if(d.exists) monedasIniciales = d.data().monedas;
+    if (email) {
+        try {
+            const d = await db.collection('usuarios').doc(email).get();
+            if (d.exists) monedasIniciales = d.data().monedas;
+        } catch (e) {
+            console.error(`No se pudo leer el saldo de ${email} al entrar a la sala:`, e.message);
+        }
     }
 
     salas[sala].jugadores[socket.id] = { 
@@ -1355,6 +1364,7 @@ io.on('connection', (socket) => {
     io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
     io.to(sala).emit('bote-actualizado', salas[sala].bote);
     io.to(sala).emit('historial-actualizado', salas[sala].historial);
+    socket.emit('silenciados-actualizados', salas[sala].silenciados || []);
     emitirContadores();
   });
 
@@ -1566,11 +1576,18 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('veredicto-host', async ({ sala, candidatoId, esValido }) => {
+  socket.on('veredicto-host', async ({ sala, candidatoId, esValido, cartaGanadora }) => {
       const salaInfo = salas[sala];
       if (!salaInfo || socket.id !== salaInfo.hostId) return;
       const candidato = salaInfo.reclamantes.find(r => r.id === candidatoId);
       if (candidato) candidato.status = esValido ? 'validado' : 'rechazado';
+
+      // Con qué carta se cerró la tabla. Sirve sobre todo cuando el anfitrión se
+      // valida a sí mismo: enseñarla a todos deja el veredicto a la vista en vez
+      // de pedir que le crean. Solo se acepta si de verdad se cantó.
+      if (esValido && cartaGanadora && salaInfo.historial.includes(String(cartaGanadora))) {
+          salaInfo.cartaGanadora = String(cartaGanadora);
+      }
       const pendientes = salaInfo.reclamantes.filter(r => r.status === 'pendiente');
       if (pendientes.length > 0) {
           io.to(salaInfo.hostId).emit('continuar-validacion', salaInfo.reclamantes);
@@ -1608,7 +1625,12 @@ io.on('connection', (socket) => {
           salaInfo.reclamantes = [];
           salaInfo.validandoEmpate = false;
 
-          io.to(sala).emit('ganadores-multiples', { ganadores: ganadoresReales.map(g => g.nickname), premio: premioPorCabeza });
+          io.to(sala).emit('ganadores-multiples', {
+              ganadores: ganadoresReales.map(g => g.nickname),
+              premio: premioPorCabeza,
+              cartaGanadora: salaInfo.cartaGanadora || null
+          });
+          salaInfo.cartaGanadora = null;
           io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores); // Aquí se envían las nuevas rachas
           io.to(sala).emit('bote-actualizado', 0);
       } 
@@ -1648,7 +1670,37 @@ io.on('connection', (socket) => {
   });
 
   socket.on("enviar-efecto-sonido", ({ sala, soundId, emisor }) => {
+      const salaInfo = salas[sala];
+      if (!salaInfo) return;
+
+      // El tablero de sonidos es divertido hasta que alguien lo usa de metralla.
+      // El silencio es por partida y por jugador, y lo decide el anfitrión.
+      const quien = salaInfo.jugadores[socket.id];
+      if (quien && salaInfo.silenciados && salaInfo.silenciados.includes(quien.email)) {
+          // Se le confirma a él solo, para que no crea que la app se trabó.
+          socket.emit("estas-silenciado");
+          return;
+      }
+
       io.to(sala).emit("reproducir-efecto-sonido", { soundId, emisor });
+  });
+
+  socket.on("silenciar-jugador", ({ sala, email, silenciar }) => {
+      const salaInfo = salas[sala];
+      if (!salaInfo || socket.id !== salaInfo.hostId) return;   // solo el anfitrión
+      if (!email) return;
+
+      if (!salaInfo.silenciados) salaInfo.silenciados = [];
+
+      if (silenciar) {
+          if (!salaInfo.silenciados.includes(email)) salaInfo.silenciados.push(email);
+      } else {
+          salaInfo.silenciados = salaInfo.silenciados.filter(e => e !== email);
+      }
+
+      // Se avisa a toda la sala para que la lista de jugadores muestre el estado.
+      io.to(sala).emit("silenciados-actualizados", salaInfo.silenciados);
+      io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores);
   });
 
 
