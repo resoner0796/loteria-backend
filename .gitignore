@@ -1,0 +1,26 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Entornos y secretos — NUNCA commitear
+.env
+.env.*
+!.env.example
+serviceAccountKey.json
+firebase-adminsdk*.json
+*.pem
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Editores
+.vscode/
+.idea/
+*.swp
+*~
+
+# Logs
+logs/
+*.log
