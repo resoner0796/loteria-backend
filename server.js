@@ -44,7 +44,17 @@ const salasPirinola = {};
 
 const SNAKES = { 18:6, 25:9, 33:19, 41:24, 48:32, 53:13 };
 const LADDERS = { 3:15, 11:28, 22:36, 30:44, 38:49, 46:51 };
-const ADMIN_EMAIL = "admin@loteria.com"; 
+// Configurable por entorno para que no tenga que vivir hardcodeado (y menos aún en el
+// frontend público). Si no se define ADMIN_EMAIL en Render, se conserva el valor viejo
+// para no romper el despliegue actual.
+// ⚠️ TEMPORAL: comparar un email sigue siendo una autorización débil. La solución real
+// es un rol 'admin' en Firestore verificado contra el JWT (Fase 1).
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || "admin@loteria.com").trim().toLowerCase();
+
+function esAdmin(email) {
+    return typeof email === 'string' && email.trim().toLowerCase() === ADMIN_EMAIL;
+}
+
 
 
 // ==========================================
@@ -67,7 +77,7 @@ app.post('/api/admin/broadcast', async (req, res) => {
     const adminEmail = req.headers['admin-email'];
     
     // Verificación
-    if (!adminEmail || adminEmail.toLowerCase() !== "admin@loteria.com") {
+    if (!esAdmin(adminEmail)) {
         return res.status(403).json({ error: "No autorizado" });
     }
 
@@ -167,7 +177,7 @@ app.post('/api/registro', async (req, res) => {
 
         // 🔥 NOTIFICACIÓN PUSH AL ADMIN (Usando 'data' para evitar duplicados)
         try {
-            const adminDoc = await db.collection('usuarios').doc("admin@loteria.com").get(); // Asegúrate que este sea tu email de admin
+            const adminDoc = await db.collection('usuarios').doc(ADMIN_EMAIL).get(); // Asegúrate que este sea tu email de admin
             if (adminDoc.exists && adminDoc.data().fcmToken) {
                 const mensajePush = {
                     data: {
@@ -180,7 +190,7 @@ app.post('/api/registro', async (req, res) => {
             }
         } catch (pushError) { console.error("Error push admin:", pushError); }
         
-        res.json({ success: true, nickname, monedas: 20, email });
+        res.json({ success: true, nickname, monedas: 20, email, esAdmin: esAdmin(email) });
     } catch (error) { res.status(500).json({ error: 'Error servidor.' }); }
 });
 
@@ -208,7 +218,10 @@ app.post('/api/login', async (req, res) => {
             avatar: userData.avatar, 
             inventario: userData.inventario || [],
             fichaActiva: userData.fichaActiva || 'assets/imagenes/ui/ficha.PNG',
-            cartasFavoritas: userData.cartasFavoritas || []
+            cartasFavoritas: userData.cartasFavoritas || [],
+            // El frontend usa esto solo para mostrar u ocultar el botón del panel.
+            // La autorización real la sigue haciendo el servidor en cada endpoint.
+            esAdmin: esAdmin(userData.email)
         });
     } catch (error) { res.status(500).json({ error: 'Error servidor.' }); }
 });
@@ -254,6 +267,27 @@ app.get('/api/usuario/datos-frescos', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Error servidor" }); }
 });
 
+
+// --- GUARDAR PREFERENCIAS (FICHAS Y CARTAS) ---
+// NOTA: esta ruta vivía por error DENTRO del handler de socket 'disconnect', lo que
+// la registraba de nuevo en cada desconexión (fuga de memoria) y la dejaba inexistente
+// hasta la primera desconexión tras cada deploy. Aquí es su lugar correcto.
+app.post('/api/usuario/guardar-preferencias', async (req, res) => {
+    const { email, fichaActiva, cartasFavoritas } = req.body;
+    if (!email) return res.status(400).json({ error: "Falta email" });
+
+    try {
+        const updateData = {};
+        if (fichaActiva) updateData.fichaActiva = fichaActiva;
+        if (cartasFavoritas) updateData.cartasFavoritas = cartasFavoritas;
+
+        await db.collection('usuarios').doc(email).update(updateData);
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Error guardando preferencias:", e);
+        res.status(500).json({ error: "Error al guardar" });
+    }
+});
 
 // --- RECOMPENSA DIARIA (NUEVO) ---
 app.post('/api/recompensa-diaria', async (req, res) => {
@@ -301,7 +335,7 @@ app.post('/api/recompensa-diaria', async (req, res) => {
 // Stats Generales (VENTAS REALES vs DEUDA)
 app.get('/api/admin/stats', async (req, res) => {
     const solicitante = req.headers['admin-email'];
-    if (solicitante !== ADMIN_EMAIL) return res.status(403).json({ error: "Acceso denegado" });
+    if (!esAdmin(solicitante)) return res.status(403).json({ error: "Acceso denegado" });
 
     try {
         const usersSnap = await db.collection('usuarios').get();
@@ -327,7 +361,7 @@ app.get('/api/admin/stats', async (req, res) => {
 // Lista de Usuarios
 app.get('/api/admin/usuarios', async (req, res) => {
     const solicitante = req.headers['admin-email'];
-    if (solicitante !== ADMIN_EMAIL) return res.status(403).json({ error: "Acceso denegado" });
+    if (!esAdmin(solicitante)) return res.status(403).json({ error: "Acceso denegado" });
     try {
         const snapshot = await db.collection('usuarios').get();
         const usuarios = snapshot.docs.map(doc => ({
@@ -343,7 +377,7 @@ app.get('/api/admin/usuarios', async (req, res) => {
 // Banear / Desbanear
 app.post('/api/admin/banear', async (req, res) => {
     const { adminEmail, targetEmail, ban } = req.body; 
-    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Acceso denegado" });
+    if (!esAdmin(adminEmail)) return res.status(403).json({ error: "Acceso denegado" });
     try {
         await db.collection('usuarios').doc(targetEmail).update({ baneado: ban });
         res.json({ success: true });
@@ -353,7 +387,7 @@ app.post('/api/admin/banear', async (req, res) => {
 // RECARGAR SALDO (SUMAR)
 app.post('/api/admin/recargar-manual', async (req, res) => {
     const { adminEmail, targetEmail, cantidad } = req.body;
-    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Acceso denegado" });
+    if (!esAdmin(adminEmail)) return res.status(403).json({ error: "Acceso denegado" });
     
     const monto = parseInt(cantidad);
     if(isNaN(monto) || monto <= 0) return res.status(400).json({ error: "Monto inválido" });
@@ -564,7 +598,7 @@ app.get('/api/hub/juegos', async (req, res) => {
 });
 app.post('/api/hub/nuevo-juego', async (req, res) => {
     const { adminEmail, titulo, url, imgPoster, descripcion, estado } = req.body;
-    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Sin permiso" });
+    if (!esAdmin(adminEmail)) return res.status(403).json({ error: "Sin permiso" });
     try {
         await db.collection('juegos_hub').add({ titulo, url, imgPoster, descripcion, estado, creado: admin.firestore.FieldValue.serverTimestamp() });
         res.json({ success: true });
@@ -573,7 +607,7 @@ app.post('/api/hub/nuevo-juego', async (req, res) => {
 app.delete('/api/hub/eliminar-juego/:id', async (req, res) => {
     const { id } = req.params;
     const adminEmail = req.headers['admin-email'];
-    if (adminEmail !== ADMIN_EMAIL) return res.status(403).json({ error: "Sin permiso" });
+    if (!esAdmin(adminEmail)) return res.status(403).json({ error: "Sin permiso" });
     try {
         await db.collection('juegos_hub').doc(id).delete();
         res.json({ success: true });
@@ -623,19 +657,45 @@ app.get('/api/confirmar-pago', async (req, res) => {
             const monedasExtra = parseInt(session.metadata.monedas_a_dar);
             const origen = session.metadata.origen_pago;
             const dineroReal = session.amount_total / 100; // Centavos a Pesos
-            
+
+            // 🔒 IDEMPOTENCIA (OBLIGATORIO)
+            // El session_id viaja en la URL a la vista del usuario. Sin esta reserva,
+            // recargar la página acredita las monedas otra vez, sin límite.
+            // Reservamos el session_id ANTES de acreditar: si ya existía, este pago
+            // ya se procesó y salimos sin tocar el saldo.
+            const pagoRef = db.collection('pagos_procesados').doc(session_id);
+            let yaProcesado = false;
+
+            await db.runTransaction(async (t) => {
+                const pagoDoc = await t.get(pagoRef);
+                if (pagoDoc.exists) { yaProcesado = true; return; }
+                t.set(pagoRef, {
+                    email, monedas: monedasExtra, montoMXN: dineroReal,
+                    origen: origen || 'loteria',
+                    fecha: admin.firestore.FieldValue.serverTimestamp()
+                });
+            });
+
+            if (yaProcesado) {
+                console.log(`♻️ Pago ${session_id} ya estaba acreditado. Se ignora el reintento.`);
+                if (origen === 'hub') return res.redirect(`${FRONTEND_HUB}/index.html?pago=exito&cantidad=${monedasExtra}`);
+                return res.redirect(`${FRONTEND_LOTERIA}/index.html?pago=exito&cantidad=${monedasExtra}`);
+            }
+
             const userRef = db.collection('usuarios').doc(email);
             const doc = await userRef.get();
-            
+
             if (doc.exists) {
                 const userData = doc.data();
-                
+
                 // 1. Actualizar Saldo y Finanzas
-                await userRef.update({ monedas: (userData.monedas || 0) + monedasExtra });
+                // increment() en vez de leer-modificar-escribir: evita perder
+                // acreditaciones concurrentes sobre la misma cuenta.
+                await userRef.update({ monedas: admin.firestore.FieldValue.increment(monedasExtra) });
                 await registrarMovimiento(email, 'recarga', monedasExtra, 'Recarga con Tarjeta', true);
-                
+
                 const finanzasRef = db.collection('finanzas').doc('general');
-                await finanzasRef.set({ 
+                await finanzasRef.set({
                     totalVentasMXN: admin.firestore.FieldValue.increment(dineroReal),
                     ultimaActualizacion: new Date()
                 }, { merge: true });
@@ -661,7 +721,7 @@ app.get('/api/confirmar-pago', async (req, res) => {
                 // B) NOTIFICACIÓN AL ADMIN (Ka-ching! 🤑)
                 try {
                     // Pon aquí TU email de admin real para que te busque
-                    const adminDoc = await db.collection('usuarios').doc("admin@loteria.com").get();
+                    const adminDoc = await db.collection('usuarios').doc(ADMIN_EMAIL).get();
                     if (adminDoc.exists && adminDoc.data().fcmToken) {
                         const msgAdmin = {
                             data: {
@@ -923,12 +983,19 @@ io.on('connection', (socket) => {
 
   // --- APOSTAR (CORREGIDO: COBRO POR CARTA) ---
   socket.on('apostar', async (data) => {
+    // El payload lo manda el cliente: puede venir null o no ser un objeto.
+    if (!data || typeof data !== 'object') return;
+
     const sala = data.sala;
     const email = data.email;
     
     if (salas[sala] && !salas[sala].juegoIniciado) {
         const jugador = salas[sala].jugadores[socket.id];
-        
+
+        // Si el socket no está registrado en esta sala, jugador es undefined.
+        // Sin esta guarda, la línea de abajo lanza TypeError y tumba el proceso.
+        if (!jugador || !Array.isArray(jugador.cartas)) return;
+
         // 1. Verificamos que tenga cartas seleccionadas
         const numCartas = jugador.cartas.length;
         if (numCartas === 0) return; // No puede apostar si no eligió cartas
@@ -1263,7 +1330,7 @@ io.on('connection', (socket) => {
       const monto = parseInt(apuesta);
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
-      if (doc.data().monedas < monto) return socket.emit('error-apuesta', 'Saldo insuficiente');
+      if (!doc.exists || doc.data().monedas < monto) return socket.emit('error-apuesta', 'Saldo insuficiente');
 
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
       await registrarMovimiento(email, 'apuesta', monto, 'Crear Mesa Serpientes', false);
@@ -1292,7 +1359,7 @@ io.on('connection', (socket) => {
       const monto = sala.apuesta;
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
-      if (doc.data().monedas < monto) return socket.emit('error-apuesta', `Necesitas $${monto}`);
+      if (!doc.exists || doc.data().monedas < monto) return socket.emit('error-apuesta', `Necesitas $${monto}`);
 
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
       await registrarMovimiento(email, 'apuesta', monto, `Unirse Serpientes ${codigo}`, false);
@@ -1494,7 +1561,7 @@ io.on('connection', (socket) => {
       const monto = parseInt(apuesta);
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
-      if (doc.data().monedas < monto) return socket.emit('error-apuesta', 'Saldo insuficiente');
+      if (!doc.exists || doc.data().monedas < monto) return socket.emit('error-apuesta', 'Saldo insuficiente');
 
       // Cobrar
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
@@ -1526,7 +1593,7 @@ io.on('connection', (socket) => {
       const monto = sala.apuesta;
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
-      if (doc.data().monedas < monto) return socket.emit('error-apuesta', `Necesitas $${monto} para entrar`);
+      if (!doc.exists || doc.data().monedas < monto) return socket.emit('error-apuesta', `Necesitas $${monto} para entrar`);
 
       // Cobrar
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
@@ -1710,23 +1777,6 @@ io.on('connection', (socket) => {
           }
       }
 
-// --- GUARDAR PREFERENCIAS (FICHAS Y CARTAS) ---
-app.post('/api/usuario/guardar-preferencias', async (req, res) => {
-    const { email, fichaActiva, cartasFavoritas } = req.body;
-    if (!email) return res.status(400).json({ error: "Falta email" });
-
-    try {
-        const updateData = {};
-        if (fichaActiva) updateData.fichaActiva = fichaActiva;
-        if (cartasFavoritas) updateData.cartasFavoritas = cartasFavoritas;
-
-        await db.collection('usuarios').doc(email).update(updateData);
-        res.json({ success: true });
-    } catch (e) {
-        console.error("Error guardando preferencias:", e);
-        res.status(500).json({ error: "Error al guardar" });
-    }
-});
       // Pirinola
       for (const pId in salasPirinola) {
           const sala = salasPirinola[pId];
@@ -1754,6 +1804,15 @@ app.post('/api/usuario/guardar-preferencias', async (req, res) => {
   });
 
 }); 
+
+// ==================== RED DE SEGURIDAD ====================
+// Node 15+ termina el proceso ante una promesa rechazada sin capturar. Muchos handlers
+// de socket son async y no tienen try/catch, así que un solo payload malformado podía
+// tumbar el servidor y con él todas las partidas activas (el estado vive en memoria).
+// Aquí lo registramos y seguimos vivos. El try/catch por handler llega en la Fase 2.
+process.on('unhandledRejection', (motivo, promesa) => {
+    console.error('⚠️ Promesa rechazada sin capturar:', motivo);
+});
 
 http.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
