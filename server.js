@@ -1436,7 +1436,14 @@ io.on('connection', (socket) => {
     };
 
     // LE DECIMOS AL CLIENTE QUÉ MODO ES (Para que cargue las imágenes correctas)
-    io.to(sala).emit('info-sala', { 
+    //
+    // Va SOLO a quien acaba de entrar. Antes se mandaba a toda la sala, y como
+    // el cliente reacciona regenerando el tablero de selección, cada vez que
+    // llegaba alguien los demás perdían de vista sus tablas marcadas y su botón
+    // de apostar volvía a "Selecciona cartas" aunque ya hubieran elegido.
+    // El modo y el costo no cambian cuando entra gente, así que nadie más
+    // necesita enterarse.
+    socket.emit('info-sala', {
         modo: salas[sala].modoJuego,
         costo: salas[sala].costoCarta
     });
