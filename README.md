@@ -44,6 +44,8 @@ npm start          # → http://localhost:3000
 | `nicknames` | JSON completo del service account de Firebase, en una sola línea |
 | `STRIPE_SECRET_KEY` | Llave secreta de Stripe |
 | `ADMIN_EMAIL` | Email de la cuenta administradora. Si no se define, cae a `admin@loteria.com` |
+| `JWT_SECRET` | **Importante.** Llave para firmar los tokens de sesión. Sin ella se genera una temporal y los tokens dejan de valer en cada reinicio |
+| `AUTH_ESTRICTA` | `true` cierra el camino sin token. Ver abajo |
 | `PORT` | Puerto (Render lo inyecta; por defecto `3000`) |
 
 > `ADMIN_EMAIL` debe coincidir **exactamente** con el ID del documento en
@@ -133,25 +135,46 @@ esté disponible y les manda un push recordándoselo.
 
 ---
 
-## 🔐 Estado de seguridad
+## 🔐 Autenticación
 
-> **Este servidor mueve dinero real y hoy no tiene autenticación.**
+El login y el registro emiten un **JWT firmado** (30 días). El cliente lo manda en
+`Authorization: Bearer <token>` y en el `auth` del handshake de Socket.IO.
 
-No existen sesiones ni tokens. El servidor confía en el email que le llegue en el
-cuerpo de la petición o en un header. Huecos conocidos:
+Cuando la petición trae token válido, la identidad sale de ahí y **se ignora cualquier
+email del body**. Esa es la ruta segura.
 
-| # | Problema | Impacto |
+### Fase de convivencia
+
+Este servidor atiende a varios frontends (Lotería, Hub, Serpientes, Pirinola) y
+ninguno mandaba token. Exigirlo de golpe habría tumbado a todos los que no se hayan
+redesplegado, más a cualquier usuario con la sesión abierta.
+
+Por eso, mientras `AUTH_ESTRICTA` no sea `true`, las peticiones sin token siguen
+aceptando el email del body **igual que antes**, pero quedan contadas por ruta:
+
+```bash
+curl -H "Authorization: Bearer <token-de-admin>" https://<backend>/api/admin/uso-heredado
+```
+
+```json
+{ "modoEstricto": false, "totalSinToken": 0, "porRuta": {} }
+```
+
+Cuando `porRuta` se mantenga vacío un buen rato, significa que ya nadie depende del
+camino viejo: pon `AUTH_ESTRICTA=true` en Render y queda cerrado.
+
+> ⚠️ **Hasta entonces los huecos siguen abiertos.** La convivencia no empeora nada
+> respecto a antes, pero tampoco cierra nada: cualquiera que no mande token sigue
+> pudiendo declarar el email que quiera.
+
+### Lo que falta
+
+| # | Problema | Estado |
 |---|---|---|
-| 1 | `/api/transferir-saldo` no verifica que quien llama sea el dueño de `origenEmail`, y `/api/buscar-destinatario` revela el email de cualquier nickname | Cualquiera puede vaciar la cuenta de cualquiera |
-| 2 | Los `/api/admin/*` se autorizan con un header de texto plano contra un email que está hardcodeado en el frontend público | Monedas infinitas, baneos arbitrarios |
-| 3 | `/api/admin/usuarios` con el mismo header trivial | Fuga de la base de usuarios |
-| 4 | El SSO del Hub es JSON en base64 sin firmar | Suplantación de identidad |
-| 5 | Los eventos de socket toman el email del payload del cliente | Compras y apuestas a nombre de terceros |
-| 6 | Sin rate limiting ni validación de entrada | Fuerza bruta, spam de registros |
-
-**Plan:** JWT firmado emitido en el login, leído del header `Authorization`, y
-handshake autenticado en Socket.IO. El despliegue tiene que ser coordinado con el
-frontend.
+| 1 | `/api/buscar-destinatario` revela el email de cualquier nickname | Pendiente |
+| 2 | Sin rate limiting ni validación de entrada | Pendiente |
+| 3 | El SSO del Hub debe pasar a mandar el JWT en vez de base64 sin firmar | Pendiente en el Hub |
+| 4 | Nicknames no únicos | Pendiente |
 
 ---
 
@@ -169,9 +192,10 @@ frontend.
 ## 🗺️ Roadmap
 
 - [x] Documentar arquitectura (`CLAUDE.md`, `README.md`)
-- [ ] **Autenticación JWT** + handshake de socket autenticado
+- [x] **Autenticación JWT** + handshake de socket autenticado (en convivencia)
+- [ ] Poner `AUTH_ESTRICTA=true` cuando los contadores lleguen a cero
 - [ ] Rate limiting y validación de entrada
-- [ ] Mover secretos y `ADMIN_EMAIL` a variables de entorno
+- [x] Mover `ADMIN_EMAIL` a variable de entorno
 - [ ] Estado de salas en Redis
 - [ ] Partir `server.js` en módulos por juego
 - [ ] Webhook de Stripe en lugar de confiar en el redirect de retorno

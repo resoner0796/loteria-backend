@@ -33,9 +33,94 @@ const bcrypt = require('bcryptjs');
 const cors = require('cors');
 
 app.use(cors());
-app.use(express.json()); 
+app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+
+// ==========================================================
+// 🔑 AUTENTICACIÓN JWT — FASE DE CONVIVENCIA
+// ==========================================================
+//
+// Este servidor atiende a varios frontends (Lotería, Hub, Serpientes, Pirinola)
+// y ninguno mandaba token hasta ahora. Si exigiéramos JWT de golpe, se caerían
+// todos los que no se hayan redesplegado, más cualquier usuario con sesión
+// abierta (su localStorage no tiene token).
+//
+// Por eso durante esta fase:
+//   - El login y el registro EMITEN token.
+//   - Si la petición trae token válido, la identidad sale de ahí y se ignora
+//     cualquier email del body. Esa es la ruta segura.
+//   - Si no trae token, se acepta el email del body como antes, pero se cuenta
+//     en `usoHeredado` para saber cuándo ya nadie depende del camino viejo.
+//
+// Cerrar la puerta es cambiar MODO_ESTRICTO a true, una vez que los contadores
+// de /api/admin/uso-heredado se queden en cero.
+const jwt = require('jsonwebtoken');
+
+const MODO_ESTRICTO = process.env.AUTH_ESTRICTA === 'true';
+const VIGENCIA_TOKEN = '30d';
+
+let JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    // Sin secreto no podemos firmar de forma estable. Generamos uno efímero para
+    // no tumbar el arranque, pero los tokens mueren en cada reinicio.
+    JWT_SECRET = require('crypto').randomBytes(48).toString('hex');
+    console.warn('⚠️ JWT_SECRET no está definido. Se generó uno temporal: los tokens');
+    console.warn('   dejarán de valer en cada reinicio. Defínelo en Render.');
+}
+
+function emitirToken(email, admin) {
+    return jwt.sign({ email, esAdmin: !!admin }, JWT_SECRET, { expiresIn: VIGENCIA_TOKEN });
+}
+
+function leerToken(bruto) {
+    if (!bruto || typeof bruto !== 'string') return null;
+    const token = bruto.startsWith('Bearer ') ? bruto.slice(7) : bruto;
+    try {
+        return jwt.verify(token, JWT_SECRET);
+    } catch {
+        return null;
+    }
+}
+
+// Contadores de peticiones que todavía llegan sin token, por ruta.
+const usoHeredado = {};
+function anotarUsoHeredado(etiqueta) {
+    usoHeredado[etiqueta] = (usoHeredado[etiqueta] || 0) + 1;
+    if (usoHeredado[etiqueta] === 1 || usoHeredado[etiqueta] % 100 === 0) {
+        console.log(`🔓 Sin token: ${etiqueta} (${usoHeredado[etiqueta]} veces)`);
+    }
+}
+
+// Middleware permisivo: si hay token válido lo deja en req.usuario, si no, null.
+app.use((req, _res, next) => {
+    req.usuario = leerToken(req.headers.authorization);
+    next();
+});
+
+/**
+ * Identidad efectiva de la petición.
+ * Con token manda el token. Sin token, y solo si no estamos en modo estricto,
+ * se acepta el email que venga en el body o la query, como se hacía antes.
+ * Devuelve null si no hay forma legítima de identificar a quien llama.
+ */
+function identificar(req, emailDeclarado, etiqueta) {
+    if (req.usuario?.email) return req.usuario.email;
+    if (MODO_ESTRICTO) return null;
+    if (!emailDeclarado) return null;
+    anotarUsoHeredado(etiqueta);
+    return emailDeclarado;
+}
+
+/** ¿Quien llama es administrador? Con token se confía en el claim; si no, al header. */
+function solicitanteEsAdmin(req) {
+    if (req.usuario) return !!req.usuario.esAdmin;
+    if (MODO_ESTRICTO) return false;
+    const declarado = req.headers['admin-email'] || req.body?.adminEmail;
+    if (!esAdmin(declarado)) return false;
+    anotarUsoHeredado('admin sin token');
+    return true;
+}
 
 // ==================== VARIABLES GLOBALES ====================
 const salas = {}; // Lotería
@@ -63,8 +148,10 @@ function esAdmin(email) {
 
 // 1. GUARDAR TOKEN (Para cualquier usuario)
 app.post('/api/usuario/guardar-fcm', async (req, res) => {
-    const { email, fcmToken } = req.body;
-    if (!email || !fcmToken) return res.status(400).json({ error: "Datos incompletos" });
+    const { fcmToken } = req.body;
+    const email = identificar(req, req.body.email, 'POST /usuario/guardar-fcm');
+    if (!email) return res.status(401).json({ error: "Sesión no válida" });
+    if (!fcmToken) return res.status(400).json({ error: "Datos incompletos" });
     try {
         await db.collection('usuarios').doc(email).update({ fcmToken: fcmToken });
         res.json({ success: true });
@@ -74,10 +161,9 @@ app.post('/api/usuario/guardar-fcm', async (req, res) => {
 // 2. BROADCAST (CORREGIDO ERROR 404 /BATCH)
 app.post('/api/admin/broadcast', async (req, res) => {
     const { titulo, cuerpo } = req.body;
-    const adminEmail = req.headers['admin-email'];
     
     // Verificación
-    if (!esAdmin(adminEmail)) {
+    if (!solicitanteEsAdmin(req)) {
         return res.status(403).json({ error: "No autorizado" });
     }
 
@@ -190,7 +276,11 @@ app.post('/api/registro', async (req, res) => {
             }
         } catch (pushError) { console.error("Error push admin:", pushError); }
         
-        res.json({ success: true, nickname, monedas: 20, email, esAdmin: esAdmin(email) });
+        res.json({
+            success: true, nickname, monedas: 20, email,
+            esAdmin: esAdmin(email),
+            token: emitirToken(email, esAdmin(email))
+        });
     } catch (error) { res.status(500).json({ error: 'Error servidor.' }); }
 });
 
@@ -221,15 +311,18 @@ app.post('/api/login', async (req, res) => {
             cartasFavoritas: userData.cartasFavoritas || [],
             // El frontend usa esto solo para mostrar u ocultar el botón del panel.
             // La autorización real la sigue haciendo el servidor en cada endpoint.
-            esAdmin: esAdmin(userData.email)
+            esAdmin: esAdmin(userData.email),
+            // A partir de aquí el cliente debe mandar este token en cada petición
+            // (Authorization: Bearer ...) y en el handshake del socket.
+            token: emitirToken(userData.email, esAdmin(userData.email))
         });
     } catch (error) { res.status(500).json({ error: 'Error servidor.' }); }
 });
 
 // 3. DATOS FRESCOS (CON HORA CDMX)
 app.get('/api/usuario/datos-frescos', async (req, res) => {
-    const { email } = req.query;
-    if (!email) return res.status(400).json({ error: "Falta email" });
+    const email = identificar(req, req.query.email, 'GET /usuario/datos-frescos');
+    if (!email) return res.status(401).json({ error: "Sesión no válida" });
     try {
         const userDoc = await db.collection('usuarios').doc(email).get();
         if (!userDoc.exists) return res.status(404).json({ error: "No encontrado" });
@@ -261,9 +354,19 @@ app.get('/api/usuario/datos-frescos', async (req, res) => {
             };
         });
         
-        res.json({ success: true, monedas: userDoc.data().monedas, historial, fichaActiva: userDoc.data().fichaActiva || 'assets/imagenes/ui/ficha.PNG',
-    cartasFavoritas: userDoc.data().cartasFavoritas || [],
-    inventario: userDoc.data().inventario || [] });
+        res.json({
+            success: true,
+            // email, nickname y esAdmin permiten reconstruir la sesión completa a
+            // partir de un token, que es lo que necesita el SSO firmado del Hub.
+            email,
+            nickname: userDoc.data().nickname,
+            esAdmin: esAdmin(email),
+            monedas: userDoc.data().monedas,
+            historial,
+            fichaActiva: userDoc.data().fichaActiva || 'assets/imagenes/ui/ficha.PNG',
+            cartasFavoritas: userDoc.data().cartasFavoritas || [],
+            inventario: userDoc.data().inventario || []
+        });
     } catch (error) { res.status(500).json({ error: "Error servidor" }); }
 });
 
@@ -273,8 +376,9 @@ app.get('/api/usuario/datos-frescos', async (req, res) => {
 // la registraba de nuevo en cada desconexión (fuga de memoria) y la dejaba inexistente
 // hasta la primera desconexión tras cada deploy. Aquí es su lugar correcto.
 app.post('/api/usuario/guardar-preferencias', async (req, res) => {
-    const { email, fichaActiva, cartasFavoritas } = req.body;
-    if (!email) return res.status(400).json({ error: "Falta email" });
+    const { fichaActiva, cartasFavoritas } = req.body;
+    const email = identificar(req, req.body.email, 'POST /usuario/guardar-preferencias');
+    if (!email) return res.status(401).json({ error: "Sesión no válida" });
 
     try {
         const updateData = {};
@@ -291,8 +395,8 @@ app.post('/api/usuario/guardar-preferencias', async (req, res) => {
 
 // --- RECOMPENSA DIARIA (NUEVO) ---
 app.post('/api/recompensa-diaria', async (req, res) => {
-    const { email } = req.body;
-    if(!email) return res.status(400).json({ error: "Falta email" });
+    const email = identificar(req, req.body.email, 'POST /recompensa-diaria');
+    if (!email) return res.status(401).json({ error: "Sesión no válida" });
 
     try {
         const userRef = db.collection('usuarios').doc(email);
@@ -332,10 +436,22 @@ app.post('/api/recompensa-diaria', async (req, res) => {
 
 // --- ADMIN DASHBOARD API ---
 
+// Cuántas peticiones siguen llegando sin token, desglosadas por ruta. Cuando esto
+// se mantenga en cero un buen rato, se puede poner AUTH_ESTRICTA=true en Render
+// para cerrar el camino viejo sabiendo que no se tumba a nadie.
+app.get('/api/admin/uso-heredado', (req, res) => {
+    if (!solicitanteEsAdmin(req)) return res.status(403).json({ error: "Acceso denegado" });
+    res.json({
+        modoEstricto: MODO_ESTRICTO,
+        totalSinToken: Object.values(usoHeredado).reduce((a, b) => a + b, 0),
+        servidorArrancado: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+        porRuta: usoHeredado
+    });
+});
+
 // Stats Generales (VENTAS REALES vs DEUDA)
 app.get('/api/admin/stats', async (req, res) => {
-    const solicitante = req.headers['admin-email'];
-    if (!esAdmin(solicitante)) return res.status(403).json({ error: "Acceso denegado" });
+    if (!solicitanteEsAdmin(req)) return res.status(403).json({ error: "Acceso denegado" });
 
     try {
         const usersSnap = await db.collection('usuarios').get();
@@ -360,8 +476,7 @@ app.get('/api/admin/stats', async (req, res) => {
 
 // Lista de Usuarios
 app.get('/api/admin/usuarios', async (req, res) => {
-    const solicitante = req.headers['admin-email'];
-    if (!esAdmin(solicitante)) return res.status(403).json({ error: "Acceso denegado" });
+    if (!solicitanteEsAdmin(req)) return res.status(403).json({ error: "Acceso denegado" });
     try {
         const snapshot = await db.collection('usuarios').get();
         const usuarios = snapshot.docs.map(doc => ({
@@ -377,7 +492,7 @@ app.get('/api/admin/usuarios', async (req, res) => {
 // Banear / Desbanear
 app.post('/api/admin/banear', async (req, res) => {
     const { adminEmail, targetEmail, ban } = req.body; 
-    if (!esAdmin(adminEmail)) return res.status(403).json({ error: "Acceso denegado" });
+    if (!solicitanteEsAdmin(req)) return res.status(403).json({ error: "Acceso denegado" });
     try {
         await db.collection('usuarios').doc(targetEmail).update({ baneado: ban });
         res.json({ success: true });
@@ -387,7 +502,7 @@ app.post('/api/admin/banear', async (req, res) => {
 // RECARGAR SALDO (SUMAR)
 app.post('/api/admin/recargar-manual', async (req, res) => {
     const { adminEmail, targetEmail, cantidad } = req.body;
-    if (!esAdmin(adminEmail)) return res.status(403).json({ error: "Acceso denegado" });
+    if (!solicitanteEsAdmin(req)) return res.status(403).json({ error: "Acceso denegado" });
     
     const monto = parseInt(cantidad);
     if(isNaN(monto) || monto <= 0) return res.status(400).json({ error: "Monto inválido" });
@@ -463,10 +578,15 @@ app.post('/api/buscar-destinatario', async (req, res) => {
 
 // 2. TRANSFERIR SALDO (CON NOTIFICACIÓN AL DESTINATARIO)
 app.post('/api/transferir-saldo', async (req, res) => {
-    const { origenEmail, destinoEmail, cantidad } = req.body;
+    const { destinoEmail, cantidad } = req.body;
     const monto = parseInt(cantidad);
 
-    if (!origenEmail || !destinoEmail || !monto || monto < 1) {
+    // 🔑 El origen sale del token, NUNCA del body. Antes se aceptaba tal cual, así
+    // que bastaba con conocer el email de alguien para vaciarle la cuenta.
+    const origenEmail = identificar(req, req.body.origenEmail, 'POST /transferir-saldo');
+    if (!origenEmail) return res.status(401).json({ error: "Sesión no válida. Vuelve a iniciar sesión." });
+
+    if (!destinoEmail || !monto || monto < 1) {
         return res.status(400).json({ error: "Datos inválidos" });
     }
 
@@ -545,8 +665,8 @@ app.post('/api/transferir-saldo', async (req, res) => {
 
 // 3. HISTORIAL COMPLETO (CORREGIDO HORA CDMX)
 app.get('/api/historial-usuario', async (req, res) => {
-    const { email } = req.query;
-    if (!email) return res.status(400).json({ error: "Falta email" });
+    const email = identificar(req, req.query.email, 'GET /historial-usuario');
+    if (!email) return res.status(401).json({ error: "Sesión no válida" });
 
     try {
         const snapshot = await db.collection('usuarios').doc(email).collection('historial')
@@ -598,7 +718,7 @@ app.get('/api/hub/juegos', async (req, res) => {
 });
 app.post('/api/hub/nuevo-juego', async (req, res) => {
     const { adminEmail, titulo, url, imgPoster, descripcion, estado } = req.body;
-    if (!esAdmin(adminEmail)) return res.status(403).json({ error: "Sin permiso" });
+    if (!solicitanteEsAdmin(req)) return res.status(403).json({ error: "Sin permiso" });
     try {
         await db.collection('juegos_hub').add({ titulo, url, imgPoster, descripcion, estado, creado: admin.firestore.FieldValue.serverTimestamp() });
         res.json({ success: true });
@@ -606,16 +726,17 @@ app.post('/api/hub/nuevo-juego', async (req, res) => {
 });
 app.delete('/api/hub/eliminar-juego/:id', async (req, res) => {
     const { id } = req.params;
-    const adminEmail = req.headers['admin-email'];
-    if (!esAdmin(adminEmail)) return res.status(403).json({ error: "Sin permiso" });
+    if (!solicitanteEsAdmin(req)) return res.status(403).json({ error: "Sin permiso" });
     try {
         await db.collection('juegos_hub').doc(id).delete();
         res.json({ success: true });
     } catch (error) { res.status(500).json({ error: "Error al eliminar" }); }
 });
 app.post('/api/actualizar-perfil', async (req, res) => {
-    const { email, nickname, avatar } = req.body;
-    if (!email || !nickname) return res.status(400).json({ error: "Faltan datos" });
+    const { nickname, avatar } = req.body;
+    const email = identificar(req, req.body.email, 'POST /actualizar-perfil');
+    if (!email) return res.status(401).json({ error: "Sesión no válida" });
+    if (!nickname) return res.status(400).json({ error: "Faltan datos" });
     try {
         await db.collection('usuarios').doc(email).update({ nickname: nickname, avatar: avatar || 'assets/avatar.png' });
         res.json({ success: true });
@@ -628,7 +749,9 @@ const FRONTEND_HUB = "https://juegosenlanube.com";
 const BACKEND_URL = "https://loteria-backend-3nde.onrender.com";
 
 app.post('/api/crear-orden', async (req, res) => {
-    const { cantidad, precio, email, origen } = req.body;
+    const { cantidad, precio, origen } = req.body;
+    const email = identificar(req, req.body.email, 'POST /crear-orden');
+    if (!email) return res.status(401).json({ error: "Sesión no válida" });
     try {
         const session = await stripe.checkout.sessions.create({
             ui_mode: 'embedded',
@@ -841,12 +964,36 @@ function emitirContadores() {
     });
 }
 
+// 🔑 Handshake: si el cliente manda token en `auth`, dejamos la identidad
+// verificada pegada al socket. A partir de ahí ya no importa lo que declare en
+// los payloads de cada evento.
+io.use((socket, next) => {
+    const datos = leerToken(socket.handshake.auth?.token);
+    socket.data.email = datos?.email || null;
+    socket.data.esAdmin = !!datos?.esAdmin;
+    next(); // Nunca rechazamos: durante la convivencia los clientes viejos siguen entrando.
+});
+
+/**
+ * Identidad efectiva de un evento de socket: manda la del handshake; si no hay,
+ * se acepta la que declare el payload (y se cuenta), salvo en modo estricto.
+ */
+function emailDeSocket(socket, emailDeclarado, etiqueta) {
+    if (socket.data.email) return socket.data.email;
+    if (MODO_ESTRICTO) return null;
+    if (!emailDeclarado) return null;
+    anotarUsoHeredado(`socket ${etiqueta}`);
+    return emailDeclarado;
+}
+
 io.on('connection', (socket) => {
   console.log('Cliente conectado:', socket.id);
   emitirContadores();
 
   // --- GENERAL ---
   socket.on('solicitar-info-usuario', async (email) => {
+      email = emailDeSocket(socket, email, 'solicitar-info-usuario');
+      if (!email) return;
       try {
           const doc = await db.collection('usuarios').doc(email).get();
           if (doc.exists) socket.emit('usuario-actualizado', doc.data());
@@ -854,7 +1001,8 @@ io.on('connection', (socket) => {
   });
 
   // --- LOTERIA ---
-  socket.on('unirse-sala', async ({ nickname, email, sala, modo }) => { 
+  socket.on('unirse-sala', async ({ nickname, email, sala, modo }) => {
+    email = emailDeSocket(socket, email, 'unirse-sala');
     socket.join(sala);
     
     // Configuración Inicial de la Sala
@@ -987,7 +1135,7 @@ io.on('connection', (socket) => {
     if (!data || typeof data !== 'object') return;
 
     const sala = data.sala;
-    const email = data.email;
+    const email = emailDeSocket(socket, data.email, 'apostar');
     
     if (salas[sala] && !salas[sala].juegoIniciado) {
         const jugador = salas[sala].jugadores[socket.id];
@@ -1208,6 +1356,7 @@ io.on('connection', (socket) => {
   // =========================================================
 
   socket.on('comprar-item', async ({ email, itemId, precio }) => {
+      email = emailDeSocket(socket, email, 'comprar-item');
       if (!email || !itemId) return;
 
       try {
@@ -1265,6 +1414,8 @@ io.on('connection', (socket) => {
 
   // --- TIENDA DE SKINS (Igual que antes) ---
   socket.on('comprar-skin', async ({ email, itemId, precio }) => {
+      email = emailDeSocket(socket, email, 'comprar-skin');
+      if (!email) return;
       try {
           const userRef = db.collection('usuarios').doc(email);
           await db.runTransaction(async (t) => {
@@ -1283,6 +1434,8 @@ io.on('connection', (socket) => {
 
   // --- 1. ENTRADA PÚBLICA (MATCHMAKING) ---
   socket.on('entrar-serpientes', async ({ email, nickname, apuesta, vsCpu, skin }) => {
+      email = emailDeSocket(socket, email, 'entrar-serpientes');
+      if (!email) return socket.emit('error-apuesta', 'Sesión no válida');
       // Anti-Ghost
       for (const sId in salasSerpientes) { if (salasSerpientes[sId].jugadores.some(j => j.id === socket.id)) return; }
 
@@ -1327,6 +1480,8 @@ io.on('connection', (socket) => {
 
   // --- 2. CREAR SALA PRIVADA ---
   socket.on('crear-sala-serpientes', async ({ email, nickname, apuesta, skin }) => {
+      email = emailDeSocket(socket, email, 'crear-sala-serpientes');
+      if (!email) return socket.emit('error-apuesta', 'Sesión no válida');
       const monto = parseInt(apuesta);
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
@@ -1349,6 +1504,8 @@ io.on('connection', (socket) => {
 
   // --- 3. UNIRSE A PRIVADA ---
   socket.on('unirse-sala-serpientes-privada', async ({ email, nickname, codigo, skin }) => {
+      email = emailDeSocket(socket, email, 'unirse-sala-serpientes-privada');
+      if (!email) return socket.emit('error-apuesta', 'Sesión no válida');
       const salaId = Object.keys(salasSerpientes).find(id => salasSerpientes[id].codigo === codigo);
       
       if (!salaId) return socket.emit('error-apuesta', 'Sala no encontrada');
@@ -1511,6 +1668,8 @@ io.on('connection', (socket) => {
 
   // --- 1. JUEGO PÚBLICO (MATCHMAKING) ---
   socket.on('entrar-pirinola', async ({ email, nickname, apuesta, vsCpu }) => {
+      email = emailDeSocket(socket, email, 'entrar-pirinola');
+      if (!email) return socket.emit('error-apuesta', 'Sesión no válida');
       // Validar Saldo
       const monto = parseInt(apuesta);
       const userRef = db.collection('usuarios').doc(email);
@@ -1558,6 +1717,8 @@ io.on('connection', (socket) => {
 
   // --- 2. CREAR SALA PRIVADA (NUEVO) ---
   socket.on('crear-sala-privada', async ({ email, nickname, apuesta }) => {
+      email = emailDeSocket(socket, email, 'crear-sala-privada');
+      if (!email) return socket.emit('error-apuesta', 'Sesión no válida');
       const monto = parseInt(apuesta);
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
@@ -1582,6 +1743,8 @@ io.on('connection', (socket) => {
 
   // --- 3. UNIRSE A SALA PRIVADA (NUEVO) ---
   socket.on('unirse-sala-privada', async ({ email, nickname, codigo }) => {
+      email = emailDeSocket(socket, email, 'unirse-sala-privada');
+      if (!email) return socket.emit('error-apuesta', 'Sesión no válida');
       // Buscar sala por código
       const salaId = Object.keys(salasPirinola).find(id => salasPirinola[id].codigo === codigo);
       
