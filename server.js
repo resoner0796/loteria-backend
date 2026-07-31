@@ -11,6 +11,56 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+// ==========================================================
+// 🎰 POZO ACUMULADO
+// ==========================================================
+// Bote aparte que crece $1 por partida y por jugador que se apunte, y que solo
+// se lleva quien llene las 4 barajas del centro. Lo valida el anfitrión a ojo,
+// igual que la lotería normal, porque las tablas son imágenes y el servidor no
+// sabe qué baraja cayó en qué casilla.
+//
+// OJO con el nombre: ya existe un MODO llamado 'pozo' (Pozo y Esquinas, el de
+// las 20 tablas especiales). Son cosas distintas. Aquí siempre es "acumulado".
+//
+// Vive en Firestore, no en memoria: el estado de las salas se pierde en cada
+// redespliegue y esto es dinero comprado con tarjeta. Va atado a la sala Y al
+// correo de quien la creó, porque las salas se identifican solo por su nombre:
+// sin eso, cualquiera que abriera una sala llamada "Familia" caería en el mismo
+// pozo que la tuya.
+
+function idPozo(sala, creador) {
+    // El ID de documento no admite '/'. Lo demás se deja legible a propósito,
+    // para poder auditar a mano desde la consola de Firebase.
+    const limpio = (s) => String(s || '').replace(/\//g, '_').trim();
+    return `${limpio(sala)}__${limpio(creador).toLowerCase()}`;
+}
+
+async function leerPozo(salaInfo) {
+    if (!salaInfo.pozoId) return 0;
+    try {
+        const doc = await db.collection('pozos').doc(salaInfo.pozoId).get();
+        return doc.exists ? (doc.data().acumulado || 0) : 0;
+    } catch (e) {
+        console.error("Error leyendo pozo:", e.message);
+        return salaInfo.pozoAcumulado || 0;
+    }
+}
+
+async function moverPozo(salaInfo, delta) {
+    if (!salaInfo.pozoId || !delta) return;
+    try {
+        await db.collection('pozos').doc(salaInfo.pozoId).set({
+            sala: salaInfo.nombre || null,
+            creador: salaInfo.creador || null,
+            acumulado: admin.firestore.FieldValue.increment(delta),
+            actualizado: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        salaInfo.pozoAcumulado = Math.max(0, (salaInfo.pozoAcumulado || 0) + delta);
+    } catch (e) {
+        console.error("Error moviendo pozo:", e.message);
+    }
+}
+
 // --- HELPER: EMISIÓN DE LA BANCA ---
 // En los modos contra la CPU el bot aporta al bote monedas que no salieron de
 // ninguna cuenta. Eso infla la economía en silencio, y como las monedas se
@@ -1160,6 +1210,25 @@ async function procesarReembolsoPorSalida(salaId, socketId) {
     const jugador = sala.jugadores[socketId];
     if (!jugador) return;
 
+    // Del pozo se devuelve ÚNICAMENTE lo aportado en la ronda que no llegó a
+    // empezar. Lo acumulado de rondas anteriores se queda: si se devolviera
+    // todo, participar saldría gratis —juegas, no ganas, te sales y recuperas—
+    // y el pozo dejaría de tener riesgo para nadie.
+    if (!sala.juegoIniciado && jugador.email && sala.pozoRonda?.[jugador.email]) {
+        const devolver = sala.pozoRonda[jugador.email];
+        delete sala.pozoRonda[jugador.email];
+        jugador.pozoActivo = false;
+        jugador.monedas += devolver;
+        await moverPozo(sala, -devolver);
+        try {
+            await db.collection('usuarios').doc(jugador.email).update({
+                monedas: admin.firestore.FieldValue.increment(devolver)
+            });
+            await registrarMovimiento(jugador.email, 'reembolso', devolver, 'Reembolso del pozo por salir', true);
+        } catch (e) { console.error("Error reembolsando pozo:", e.message); }
+        io.to(salaId).emit('pozo-actualizado', sala.pozoAcumulado);
+    }
+
     if (!sala.juegoIniciado && jugador.apostado) {
         const reembolso = jugador.cantidadApostada || 10; 
         jugador.monedas += reembolso;
@@ -1327,9 +1396,22 @@ io.on('connection', (socket) => {
         reclamantes: [],
         validandoEmpate: false,
         timerEmpate: null,
-        silenciados: []
+        silenciados: [],
+
+        // Pozo acumulado: atado a la sala Y a quien la creó.
+        nombre: sala,
+        creador: email || null,
+        pozoId: email ? idPozo(sala, email) : null,
+        pozoAcumulado: 0,
+        pozoRonda: {}       // { correo: monto aportado en la ronda en curso }
       };
       socket.emit('rol-asignado', { host: true });
+
+      // Rescatamos lo que quedó acumulado de sesiones anteriores.
+      leerPozo(salas[sala]).then(monto => {
+          salas[sala].pozoAcumulado = monto;
+          io.to(sala).emit('pozo-actualizado', monto);
+      });
     } else {
       socket.emit('rol-asignado', { host: (socket.id === salas[sala].hostId) });
     }
@@ -1365,6 +1447,7 @@ io.on('connection', (socket) => {
     io.to(sala).emit('bote-actualizado', salas[sala].bote);
     io.to(sala).emit('historial-actualizado', salas[sala].historial);
     socket.emit('silenciados-actualizados', salas[sala].silenciados || []);
+    socket.emit('pozo-actualizado', salas[sala].pozoAcumulado || 0);
     emitirContadores();
   });
 
@@ -1463,19 +1546,39 @@ io.on('connection', (socket) => {
         const costoUnitario = salas[sala].costoCarta || 1;
         const costoTotal = costoUnitario * numCartas;
         
+        // El pozo es opcional y cuesta $1 aparte de la apuesta. Solo se puede
+        // entrar en Tradicional y solo si la sala tiene pozo (la creó alguien
+        // con correo, que es de donde sale su identificador).
+        const quierePozo = !!data.conPozo
+            && salas[sala].modoJuego === 'tradicional'
+            && !!salas[sala].pozoId
+            && !!email;
+        const costoPozo = quierePozo ? 1 : 0;
+
         // 3. Verificamos si le alcanza para EL TOTAL
-        if (jugador && !jugador.apostado && jugador.monedas >= costoTotal) {
-            jugador.monedas -= costoTotal;
+        if (jugador && !jugador.apostado && jugador.monedas >= costoTotal + costoPozo) {
+            jugador.monedas -= (costoTotal + costoPozo);
             jugador.apostado = true;
             jugador.cantidadApostada = costoTotal;
             salas[sala].bote += costoTotal;
-            
+
+            if (costoPozo) {
+                // Se lleva la cuenta POR CORREO, no por socket: si a alguien se
+                // le va el internet y vuelve, su socket cambia pero su aportación
+                // tiene que seguir siendo suya.
+                jugador.pozoActivo = true;
+                salas[sala].pozoRonda[email] = (salas[sala].pozoRonda[email] || 0) + costoPozo;
+                await moverPozo(salas[sala], costoPozo);
+                io.to(sala).emit('pozo-actualizado', salas[sala].pozoAcumulado);
+            }
+
             if (email) {
                 await db.collection('usuarios').doc(email).update({ monedas: jugador.monedas });
                 // Registramos el movimiento con el detalle del cálculo
                 await registrarMovimiento(email, 'apuesta', costoTotal, `Apuesta ${salas[sala].modoJuego} (${numCartas} cartas)`, false);
+                if (costoPozo) await registrarMovimiento(email, 'apuesta', costoPozo, 'Aporte al pozo acumulado', false);
             }
-            
+
             io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
             io.to(sala).emit('bote-actualizado', salas[sala].bote);
             io.to(sala).emit("reproducir-sonido-apuesta");
@@ -1547,7 +1650,10 @@ io.on('connection', (socket) => {
       for (const id in salas[sala].jugadores) {
         salas[sala].jugadores[id].apostado = false;
         salas[sala].jugadores[id].cartas = [];
+        salas[sala].jugadores[id].pozoActivo = false;
       }
+      // Lo ya aportado NO se devuelve: se queda para la siguiente ronda.
+      salas[sala].pozoRonda = {};
       io.to(sala).emit('partida-reiniciada');
       io.to(sala).emit('jugadores-actualizados', salas[sala].jugadores);
       io.to(sala).emit('bote-actualizado', 0);
@@ -1576,7 +1682,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('veredicto-host', async ({ sala, candidatoId, esValido, tablaGanadora }) => {
+  socket.on('veredicto-host', async ({ sala, candidatoId, esValido, tablaGanadora, ganoPozo }) => {
       const salaInfo = salas[sala];
       if (!salaInfo || socket.id !== salaInfo.hostId) return;
       const candidato = salaInfo.reclamantes.find(r => r.id === candidatoId);
@@ -1589,6 +1695,14 @@ io.on('connection', (socket) => {
       //
       // Solo se acepta si la tabla era de verdad del reclamante; si no, el
       // anfitrión podría señalar una tabla que esa persona nunca tuvo.
+      // ¿Se llevó también el pozo? Solo si aportó en esta ronda: quien no se
+      // apuntó queda fuera aunque haya ganado la lotería, tal como se acordó.
+      if (esValido && ganoPozo && candidato) {
+          const jug = salaInfo.jugadores[candidato.id];
+          if (jug && jug.pozoActivo) salaInfo.ganadorPozo = candidato.id;
+          else console.log(`Se marcó pozo para ${candidato.nickname}, pero no aportó en esta ronda.`);
+      }
+
       if (esValido && candidato && tablaGanadora) {
           const suyas = candidato.boardState?.cards || [];
           if (suyas.includes(String(tablaGanadora))) {
@@ -1632,6 +1746,29 @@ io.on('connection', (socket) => {
               jugador.apostado = false;
           }
 
+          // --- POZO ACUMULADO ---
+          // Se paga aparte del bote y vacía el acumulado. Solo si el anfitrión
+          // lo marcó y esa persona aportó en esta ronda.
+          let pozoPagado = 0;
+          let quienGanoElPozo = null;
+          if (salaInfo.ganadorPozo && idsGanadores.includes(salaInfo.ganadorPozo)) {
+              const jug = salaInfo.jugadores[salaInfo.ganadorPozo];
+              const monto = salaInfo.pozoAcumulado || 0;
+              if (jug && jug.pozoActivo && monto > 0) {
+                  jug.monedas += monto;
+                  await actualizarSaldoUsuario(jug);
+                  if (jug.email) await registrarMovimiento(jug.email, 'premio', monto, '🎰 ¡Se llevó el POZO!', true);
+                  await moverPozo(salaInfo, -monto);
+                  pozoPagado = monto;
+                  quienGanoElPozo = jug.nickname;
+              }
+          }
+
+          // La ronda terminó: se limpian las aportaciones y los apuntados.
+          salaInfo.pozoRonda = {};
+          salaInfo.ganadorPozo = null;
+          for (const id in salaInfo.jugadores) salaInfo.jugadores[id].pozoActivo = false;
+
           salaInfo.bote = 0;
           salaInfo.pagoRealizado = true;
           salaInfo.reclamantes = [];
@@ -1640,9 +1777,12 @@ io.on('connection', (socket) => {
           io.to(sala).emit('ganadores-multiples', {
               ganadores: ganadoresReales.map(g => g.nickname),
               premio: premioPorCabeza,
-              prueba: salaInfo.pruebaVictoria || null
+              prueba: salaInfo.pruebaVictoria || null,
+              pozoGanado: pozoPagado,
+              ganadorPozo: quienGanoElPozo
           });
           salaInfo.pruebaVictoria = null;
+          io.to(sala).emit('pozo-actualizado', salaInfo.pozoAcumulado || 0);
           io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores); // Aquí se envían las nuevas rachas
           io.to(sala).emit('bote-actualizado', 0);
       } 
