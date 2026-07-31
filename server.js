@@ -358,6 +358,46 @@ const PAQUETES_MONEDAS = {
     500: 199.99
 };
 
+/**
+ * Todo lo que se vende por monedas, con su precio. Igual que los paquetes: el
+ * cliente dice QUÉ quiere, el precio sale de aquí.
+ *
+ * El agujero era peor que el de los paquetes. 'comprar-item' hacía
+ * `saldoActual - precio` con el precio del cliente, así que un precio NEGATIVO
+ * no compraba: sumaba. Era una máquina de imprimir monedas a la que se llegaba
+ * con un solo emit desde la consola del navegador.
+ *
+ * Si añades un artículo a la tienda de cualquier juego, tiene que aparecer aquí
+ * o no se podrá comprar.
+ */
+const CATALOGO_ITEMS = {
+    // Lotería — efectos de sonido
+    snd_risa: 0, snd_corneta: 0, snd_tepasas: 8, snd_misahorros: 8,
+    snd_ronquido: 8, snd_cuack: 8, snd_disparo: 8,
+    // Lotería — skins de ficha
+    skin_default: 0, skin_bitcoin: 5, skin_corazon: 5, skin_verde: 5, skin_frijol: 5,
+    // Serpientes y Escaleras — skins de peón
+    skin_bill: 5, skin_snake: 5, skin_alien: 5, skin_ninja: 5,
+    skin_boy: 5, skin_girl: 5, skin_hat: 5, skin_crown: 5
+};
+
+/**
+ * Normaliza un monto que llega del cliente y devuelve null si no sirve.
+ *
+ * Las apuestas se descontaban con `increment(-monto)` sobre el monto recibido.
+ * Con un monto negativo eso es un increment POSITIVO, y la guarda previa
+ * (`monedas < monto`) tampoco lo frenaba: un saldo de 500 nunca es menor que
+ * -100. Cuatro handlers —los de Serpientes y Pirinola— estaban así.
+ *
+ * Se exige entero de al menos 1. El tope superior lo pone el saldo, que sí se
+ * comprueba después.
+ */
+function montoApuestaValido(valor) {
+    const n = Number(valor);
+    if (!Number.isInteger(n) || n < 1) return null;
+    return n;
+}
+
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || "admin@loteria.com").trim().toLowerCase();
 
 function esAdmin(email) {
@@ -1945,9 +1985,18 @@ io.on('connection', (socket) => {
   // 🛒 TIENDA GENERAL (LOTERÍA: SONIDOS Y FICHAS) 🛒
   // =========================================================
 
-  socket.on('comprar-item', async ({ email, itemId, precio }) => {
+  socket.on('comprar-item', async ({ email, itemId }) => {
       email = emailDeSocket(socket, email, 'comprar-item');
       if (!email || !itemId) return;
+
+      // El precio sale del catálogo, nunca del cliente. Un `precio` en el evento
+      // se ignora. Ojo con el 0: es válido (hay artículos gratis), así que se
+      // comprueba la EXISTENCIA de la clave, no que el valor sea verdadero.
+      if (!Object.prototype.hasOwnProperty.call(CATALOGO_ITEMS, itemId)) {
+          console.warn(`⚠️ Compra rechazada: item inexistente (${itemId}) pedido por ${email}`);
+          return socket.emit('error-compra', 'Ese artículo no existe');
+      }
+      const precio = CATALOGO_ITEMS[itemId];
 
       try {
           const userRef = db.collection('usuarios').doc(email);
@@ -2003,9 +2052,16 @@ io.on('connection', (socket) => {
   // =========================================================
 
   // --- TIENDA DE SKINS (Igual que antes) ---
-  socket.on('comprar-skin', async ({ email, itemId, precio }) => {
+  socket.on('comprar-skin', async ({ email, itemId }) => {
       email = emailDeSocket(socket, email, 'comprar-skin');
       if (!email) return;
+
+      if (!Object.prototype.hasOwnProperty.call(CATALOGO_ITEMS, itemId)) {
+          console.warn(`⚠️ Compra rechazada: skin inexistente (${itemId}) pedida por ${email}`);
+          return;
+      }
+      const precio = CATALOGO_ITEMS[itemId];
+
       try {
           const userRef = db.collection('usuarios').doc(email);
           await db.runTransaction(async (t) => {
@@ -2029,7 +2085,10 @@ io.on('connection', (socket) => {
       // Anti-Ghost
       for (const sId in salasSerpientes) { if (salasSerpientes[sId].jugadores.some(j => j.id === socket.id)) return; }
 
-      const monto = parseInt(apuesta);
+      // Sin esta guarda, una apuesta negativa se convertía en increment(+monto):
+      // en vez de cobrar, regalaba monedas.
+      const monto = montoApuestaValido(apuesta);
+      if (!monto) return socket.emit('error-apuesta', 'Apuesta no válida');
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
       if (!doc.exists || doc.data().monedas < monto) return socket.emit('error-apuesta', 'Saldo insuficiente');
@@ -2076,7 +2135,10 @@ io.on('connection', (socket) => {
   socket.on('crear-sala-serpientes', async ({ email, nickname, apuesta, skin }) => {
       email = emailDeSocket(socket, email, 'crear-sala-serpientes');
       if (!email) return socket.emit('error-apuesta', 'Sesión no válida');
-      const monto = parseInt(apuesta);
+      // Sin esta guarda, una apuesta negativa se convertía en increment(+monto):
+      // en vez de cobrar, regalaba monedas.
+      const monto = montoApuestaValido(apuesta);
+      if (!monto) return socket.emit('error-apuesta', 'Apuesta no válida');
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
       if (!doc.exists || doc.data().monedas < monto) return socket.emit('error-apuesta', 'Saldo insuficiente');
@@ -2280,7 +2342,10 @@ io.on('connection', (socket) => {
       email = emailDeSocket(socket, email, 'entrar-pirinola');
       if (!email) return socket.emit('error-apuesta', 'Sesión no válida');
       // Validar Saldo
-      const monto = parseInt(apuesta);
+      // Sin esta guarda, una apuesta negativa se convertía en increment(+monto):
+      // en vez de cobrar, regalaba monedas.
+      const monto = montoApuestaValido(apuesta);
+      if (!monto) return socket.emit('error-apuesta', 'Apuesta no válida');
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
       if (!doc.exists || doc.data().monedas < monto) {
@@ -2328,7 +2393,10 @@ io.on('connection', (socket) => {
   socket.on('crear-sala-privada', async ({ email, nickname, apuesta }) => {
       email = emailDeSocket(socket, email, 'crear-sala-privada');
       if (!email) return socket.emit('error-apuesta', 'Sesión no válida');
-      const monto = parseInt(apuesta);
+      // Sin esta guarda, una apuesta negativa se convertía en increment(+monto):
+      // en vez de cobrar, regalaba monedas.
+      const monto = montoApuestaValido(apuesta);
+      if (!monto) return socket.emit('error-apuesta', 'Apuesta no válida');
       const userRef = db.collection('usuarios').doc(email);
       const doc = await userRef.get();
       if (!doc.exists || doc.data().monedas < monto) return socket.emit('error-apuesta', 'Saldo insuficiente');
