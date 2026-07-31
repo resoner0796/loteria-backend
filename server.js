@@ -347,6 +347,35 @@ function esAdmin(email) {
 }
 
 /**
+ * Recorta un documento de usuario a lo que el navegador puede ver.
+ *
+ * El documento de Firestore guarda, junto al perfil, dos cosas que NO deben
+ * salir del servidor: `password` (el hash bcrypt) y `fcmToken` (permite mandarle
+ * notificaciones push a esa persona). Durante mucho tiempo el evento
+ * 'usuario-actualizado' emitía `doc.data()` tal cual, así que el hash de la
+ * contraseña llegaba al cliente en cada sincronización y quedaba a la vista en
+ * la consola del navegador. Un bcrypt de coste 10 se ataca sin prisa fuera de
+ * línea: basta una extensión curiosa o un XSS para llevárselo.
+ *
+ * Es lista blanca a propósito. Con lista negra, cualquier campo sensible que se
+ * añada al documento en el futuro se filtraría solo, en silencio, y el fallo
+ * volvería sin que nadie lo note.
+ */
+function perfilPublico(datos) {
+    if (!datos) return null;
+    return {
+        email: datos.email,
+        nickname: datos.nickname,
+        monedas: datos.monedas,
+        avatar: datos.avatar,
+        inventario: datos.inventario || [],
+        fichaActiva: datos.fichaActiva || 'assets/imagenes/ui/ficha.PNG',
+        cartasFavoritas: datos.cartasFavoritas || [],
+        baneado: datos.baneado || false
+    };
+}
+
+/**
  * Índice de nicknames para garantizar unicidad.
  *
  * Firestore no tiene restricciones de tipo UNIQUE, así que la unicidad se
@@ -1386,7 +1415,7 @@ io.on('connection', (socket) => {
       if (!email) return;
       try {
           const doc = await db.collection('usuarios').doc(email).get();
-          if (doc.exists) socket.emit('usuario-actualizado', doc.data());
+          if (doc.exists) socket.emit('usuario-actualizado', perfilPublico(doc.data()));
       } catch (e) { console.error(e); }
   });
 
@@ -1928,7 +1957,7 @@ io.on('connection', (socket) => {
 
           // Éxito: Enviamos datos actualizados al cliente
           const docActualizado = await userRef.get();
-          socket.emit('usuario-actualizado', docActualizado.data());
+          socket.emit('usuario-actualizado', perfilPublico(docActualizado.data()));
           
           // Opcional: Feedback específico
           socket.emit('compra-exitosa', { itemId });
@@ -1959,7 +1988,7 @@ io.on('connection', (socket) => {
               t.update(userRef, { monedas: data.monedas - precio, inventario: admin.firestore.FieldValue.arrayUnion(itemId) });
           });
           const docFinal = await userRef.get();
-          socket.emit('usuario-actualizado', docFinal.data());
+          socket.emit('usuario-actualizado', perfilPublico(docFinal.data()));
           await registrarMovimiento(email, 'compra', precio, `Skin: ${itemId}`, false);
       } catch (e) { console.error("Error compra skin:", e); }
   });
@@ -1978,7 +2007,7 @@ io.on('connection', (socket) => {
 
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
       await registrarMovimiento(email, 'apuesta', monto, 'Serpientes Publica', false);
-      socket.emit('usuario-actualizado', (await userRef.get()).data());
+      socket.emit('usuario-actualizado', perfilPublico((await userRef.get()).data()));
 
       let salaId = null;
 
@@ -2025,7 +2054,7 @@ io.on('connection', (socket) => {
 
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
       await registrarMovimiento(email, 'apuesta', monto, 'Crear Mesa Serpientes', false);
-      socket.emit('usuario-actualizado', (await userRef.get()).data());
+      socket.emit('usuario-actualizado', perfilPublico((await userRef.get()).data()));
 
       const codigo = (1000 + alAzar(9000)).toString();
       const salaId = `privada_s_${codigo}`;
@@ -2056,7 +2085,7 @@ io.on('connection', (socket) => {
 
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
       await registrarMovimiento(email, 'apuesta', monto, `Unirse Serpientes ${codigo}`, false);
-      socket.emit('usuario-actualizado', (await userRef.get()).data());
+      socket.emit('usuario-actualizado', perfilPublico((await userRef.get()).data()));
 
       unirseSalaSerpientesLogica(socket, salaId, email, nickname, monto, false, skin);
   });
@@ -2143,7 +2172,7 @@ io.on('connection', (socket) => {
               await userRef.update({ monedas: admin.firestore.FieldValue.increment(reembolso) });
               await registrarMovimiento(jugador.email, 'reembolso', reembolso, 'Salida Serpientes', true);
               const docUpd = await userRef.get();
-              socket.emit('usuario-actualizado', docUpd.data());
+              socket.emit('usuario-actualizado', perfilPublico(docUpd.data()));
               socket.emit('reembolso-exitoso');
 
               sala.jugadores.splice(index, 1);
@@ -2234,7 +2263,7 @@ io.on('connection', (socket) => {
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
       await registrarMovimiento(email, 'apuesta', monto, 'Pirinola Publica', false);
       const nuevoDoc = await userRef.get();
-      socket.emit('usuario-actualizado', nuevoDoc.data());
+      socket.emit('usuario-actualizado', perfilPublico(nuevoDoc.data()));
 
       let salaId = null;
 
@@ -2278,7 +2307,7 @@ io.on('connection', (socket) => {
       // Cobrar
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
       await registrarMovimiento(email, 'apuesta', monto, 'Crear Mesa Privada', false);
-      socket.emit('usuario-actualizado', (await userRef.get()).data());
+      socket.emit('usuario-actualizado', perfilPublico((await userRef.get()).data()));
 
       // Generar Código 4 Dígitos
       const codigo = (1000 + alAzar(9000)).toString();
@@ -2312,7 +2341,7 @@ io.on('connection', (socket) => {
       // Cobrar
       await userRef.update({ monedas: admin.firestore.FieldValue.increment(-monto) });
       await registrarMovimiento(email, 'apuesta', monto, `Unirse Mesa ${codigo}`, false);
-      socket.emit('usuario-actualizado', (await userRef.get()).data());
+      socket.emit('usuario-actualizado', perfilPublico((await userRef.get()).data()));
 
       unirseALaSalaLogica(socket, salaId, email, nickname, monto, false);
   });
