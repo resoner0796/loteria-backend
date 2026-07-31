@@ -50,6 +50,49 @@ const bcrypt = require('bcryptjs');
 const cors = require('cors');
 
 app.use(cors());
+
+// ==========================================================
+// 💳 WEBHOOK DE STRIPE
+// ==========================================================
+// Va ANTES de express.json() a propósito: Stripe firma el cuerpo CRUDO, y si el
+// parser de JSON lo toca primero, la firma deja de cuadrar y no se puede
+// verificar nada.
+//
+// Este es el mecanismo FIABLE de acreditación. El retorno del navegador no lo
+// era: si el usuario cerraba la pestaña, se le iba el internet o el móvil mataba
+// la app justo después de pagar, Stripe cobraba y las monedas nunca se
+// acreditaban, sin dejar ningún rastro visible. Stripe reintenta este webhook
+// durante días hasta recibir un 200.
+app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    const secreto = process.env.STRIPE_WEBHOOK_SECRET;
+    if (!secreto) {
+        console.error('⚠️ Llegó un webhook pero STRIPE_WEBHOOK_SECRET no está definido.');
+        return res.status(500).send('webhook sin configurar');
+    }
+
+    let evento;
+    try {
+        evento = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], secreto);
+    } catch (err) {
+        // Firma inválida: o no viene de Stripe, o alguien intenta inventarse un pago.
+        console.error('❌ Firma de webhook inválida:', err.message);
+        return res.status(400).send(`Firma inválida: ${err.message}`);
+    }
+
+    if (evento.type === 'checkout.session.completed' ||
+        evento.type === 'checkout.session.async_payment_succeeded') {
+        try {
+            await acreditarPago(evento.data.object, 'webhook');
+        } catch (e) {
+            // 500 para que Stripe lo reintente más tarde en vez de darlo por bueno.
+            console.error('Error acreditando desde webhook:', e);
+            return res.status(500).send('error al acreditar');
+        }
+    }
+
+    res.json({ recibido: true });
+});
+
 app.use(express.json());
 
 // Render sirve detrás de su propio proxy. Sin esto, req.ip sería siempre la IP
@@ -837,105 +880,108 @@ app.post('/api/crear-orden', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Error orden" }); }
 });
 
-// --- CONFIRMACIÓN DE PAGO (CON DOBLE NOTIFICACIÓN) ---
+// --- ACREDITACIÓN DE UN PAGO ---
+// Una sola función para los dos caminos: el webhook de Stripe (fiable) y el
+// retorno del navegador (best effort). Es idempotente, así que da igual cuál
+// llegue primero o si llegan los dos.
+async function acreditarPago(session, origenLlamada) {
+    if (!session || session.payment_status !== 'paid') return { acreditado: false };
+
+    const email = session.metadata?.email_usuario;
+    const monedasExtra = parseInt(session.metadata?.monedas_a_dar);
+    const origen = session.metadata?.origen_pago;
+    const dineroReal = session.amount_total / 100; // Centavos a Pesos
+
+    if (!email || !monedasExtra) {
+        console.error(`⚠️ Pago ${session.id} sin metadatos utilizables.`);
+        return { acreditado: false, email, monedasExtra, origen };
+    }
+
+    // 🔒 IDEMPOTENCIA (OBLIGATORIO)
+    // El session_id viaja en la URL a la vista del usuario, y además el webhook
+    // puede reintentar. Reservamos el id ANTES de acreditar: si ya existía, este
+    // pago ya se procesó y salimos sin tocar el saldo.
+    const pagoRef = db.collection('pagos_procesados').doc(session.id);
+    let yaProcesado = false;
+
+    await db.runTransaction(async (t) => {
+        const pagoDoc = await t.get(pagoRef);
+        if (pagoDoc.exists) { yaProcesado = true; return; }
+        t.set(pagoRef, {
+            email, monedas: monedasExtra, montoMXN: dineroReal,
+            origen: origen || 'loteria',
+            acreditadoPor: origenLlamada,
+            fecha: admin.firestore.FieldValue.serverTimestamp()
+        });
+    });
+
+    if (yaProcesado) {
+        console.log(`♻️ Pago ${session.id} ya estaba acreditado. Se ignora (${origenLlamada}).`);
+        return { acreditado: false, email, monedasExtra, origen };
+    }
+
+    const userRef = db.collection('usuarios').doc(email);
+    const doc = await userRef.get();
+
+    if (doc.exists) {
+        const userData = doc.data();
+
+        // increment() en vez de leer-modificar-escribir: evita perder
+        // acreditaciones concurrentes sobre la misma cuenta.
+        await userRef.update({ monedas: admin.firestore.FieldValue.increment(monedasExtra) });
+        await registrarMovimiento(email, 'recarga', monedasExtra, 'Recarga con Tarjeta', true);
+
+        await db.collection('finanzas').doc('general').set({
+            totalVentasMXN: admin.firestore.FieldValue.increment(dineroReal),
+            ultimaActualizacion: new Date()
+        }, { merge: true });
+
+        console.log(`💰 Acreditado por ${origenLlamada}: ${monedasExtra} monedas a ${email} ($${dineroReal} MXN)`);
+
+        // --- NOTIFICACIONES DE VENTA ---
+        if (userData.fcmToken) {
+            try {
+                await admin.messaging().send({
+                    data: { titulo: "✅ ¡Pago Exitoso!", cuerpo: `Se agregaron ${monedasExtra} monedas a tu cuenta. ¡A jugar!` },
+                    token: userData.fcmToken
+                });
+            } catch(e) { console.error("Error push usuario:", e); }
+        }
+        try {
+            const adminDoc = await db.collection('usuarios').doc(ADMIN_EMAIL).get();
+            if (adminDoc.exists && adminDoc.data().fcmToken) {
+                await admin.messaging().send({
+                    data: { titulo: "🤑 ¡Nueva Venta!", cuerpo: `Usuario ${userData.nickname} compró $${dineroReal} MXN (${monedasExtra} monedas).` },
+                    token: adminDoc.data().fcmToken
+                });
+            }
+        } catch(e) { console.error("Error push admin:", e); }
+    } else {
+        console.error(`⚠️ Pago de ${email} acreditado en registro pero el usuario no existe.`);
+    }
+
+    return { acreditado: true, email, monedasExtra, origen };
+}
+
+// --- RETORNO DEL NAVEGADOR ---
+// Solo redirige y, por si el webhook aún no ha llegado, intenta acreditar. Ya no
+// es el mecanismo principal: si el usuario cierra la pestaña al pagar, este
+// endpoint nunca se ejecuta y antes eso significaba cobrar sin dar monedas.
 app.get('/api/confirmar-pago', async (req, res) => {
     const { session_id } = req.query;
-    
+
     try {
         const session = await stripe.checkout.sessions.retrieve(session_id);
-        
+
         if (session.payment_status === 'paid') {
-            const email = session.metadata.email_usuario;
-            const monedasExtra = parseInt(session.metadata.monedas_a_dar);
-            const origen = session.metadata.origen_pago;
-            const dineroReal = session.amount_total / 100; // Centavos a Pesos
-
-            // 🔒 IDEMPOTENCIA (OBLIGATORIO)
-            // El session_id viaja en la URL a la vista del usuario. Sin esta reserva,
-            // recargar la página acredita las monedas otra vez, sin límite.
-            // Reservamos el session_id ANTES de acreditar: si ya existía, este pago
-            // ya se procesó y salimos sin tocar el saldo.
-            const pagoRef = db.collection('pagos_procesados').doc(session_id);
-            let yaProcesado = false;
-
-            await db.runTransaction(async (t) => {
-                const pagoDoc = await t.get(pagoRef);
-                if (pagoDoc.exists) { yaProcesado = true; return; }
-                t.set(pagoRef, {
-                    email, monedas: monedasExtra, montoMXN: dineroReal,
-                    origen: origen || 'loteria',
-                    fecha: admin.firestore.FieldValue.serverTimestamp()
-                });
-            });
-
-            if (yaProcesado) {
-                console.log(`♻️ Pago ${session_id} ya estaba acreditado. Se ignora el reintento.`);
-                if (origen === 'hub') return res.redirect(`${FRONTEND_HUB}/index.html?pago=exito&cantidad=${monedasExtra}`);
-                return res.redirect(`${FRONTEND_LOTERIA}/index.html?pago=exito&cantidad=${monedasExtra}`);
-            }
-
-            const userRef = db.collection('usuarios').doc(email);
-            const doc = await userRef.get();
-
-            if (doc.exists) {
-                const userData = doc.data();
-
-                // 1. Actualizar Saldo y Finanzas
-                // increment() en vez de leer-modificar-escribir: evita perder
-                // acreditaciones concurrentes sobre la misma cuenta.
-                await userRef.update({ monedas: admin.firestore.FieldValue.increment(monedasExtra) });
-                await registrarMovimiento(email, 'recarga', monedasExtra, 'Recarga con Tarjeta', true);
-
-                const finanzasRef = db.collection('finanzas').doc('general');
-                await finanzasRef.set({
-                    totalVentasMXN: admin.firestore.FieldValue.increment(dineroReal),
-                    ultimaActualizacion: new Date()
-                }, { merge: true });
-
-                // =============================================
-                // 🔔 ZONA DE NOTIFICACIONES DE VENTA 🔔
-                // =============================================
-
-                // A) NOTIFICACIÓN AL USUARIO (Recibo Digital)
-                if (userData.fcmToken) {
-                    try {
-                        const msgUser = {
-                            data: {
-                                titulo: "✅ ¡Pago Exitoso!",
-                                cuerpo: `Se agregaron ${monedasExtra} monedas a tu cuenta. ¡A jugar!`
-                            },
-                            token: userData.fcmToken
-                        };
-                        await admin.messaging().send(msgUser);
-                    } catch(e) { console.error("Error push usuario:", e); }
-                }
-
-                // B) NOTIFICACIÓN AL ADMIN (Ka-ching! 🤑)
-                try {
-                    // Pon aquí TU email de admin real para que te busque
-                    const adminDoc = await db.collection('usuarios').doc(ADMIN_EMAIL).get();
-                    if (adminDoc.exists && adminDoc.data().fcmToken) {
-                        const msgAdmin = {
-                            data: {
-                                titulo: "🤑 ¡Nueva Venta!",
-                                cuerpo: `Usuario ${userData.nickname} compró $${dineroReal} MXN (${monedasExtra} monedas).`
-                            },
-                            token: adminDoc.data().fcmToken
-                        };
-                        await admin.messaging().send(msgAdmin);
-                    }
-                } catch(e) { console.error("Error push admin:", e); }
-                // =============================================
-            }
-
-            if (origen === 'hub') res.redirect(`${FRONTEND_HUB}/index.html?pago=exito&cantidad=${monedasExtra}`);
-            else res.redirect(`${FRONTEND_LOTERIA}/index.html?pago=exito&cantidad=${monedasExtra}`);
-        } else {
-            res.redirect(`${FRONTEND_HUB}/index.html?pago=cancelado`);
+            const r = await acreditarPago(session, 'retorno-navegador');
+            const destino = r.origen === 'hub' ? FRONTEND_HUB : FRONTEND_LOTERIA;
+            return res.redirect(`${destino}/index.html?pago=exito&cantidad=${r.monedasExtra}`);
         }
-    } catch (error) { 
+        res.redirect(`${FRONTEND_HUB}/index.html?pago=cancelado`);
+    } catch (error) {
         console.error(error);
-        res.redirect(`${FRONTEND_HUB}/index.html?pago=error`); 
+        res.redirect(`${FRONTEND_HUB}/index.html?pago=error`);
     }
 });
 

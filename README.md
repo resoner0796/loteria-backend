@@ -46,6 +46,7 @@ npm start          # → http://localhost:3000
 | `ADMIN_EMAIL` | Email de la cuenta administradora. Si no se define, cae a `admin@loteria.com` |
 | `JWT_SECRET` | **Importante.** Llave para firmar los tokens de sesión. Sin ella se genera una temporal y los tokens dejan de valer en cada reinicio |
 | `AUTH_ESTRICTA` | `true` cierra el camino sin token. Ver abajo |
+| `STRIPE_WEBHOOK_SECRET` | Secreto de firma del webhook (`whsec_...`). Sin él los pagos solo se acreditan si el navegador vuelve |
 | `PORT` | Puerto (Render lo inyecta; por defecto `3000`) |
 
 > `ADMIN_EMAIL` debe coincidir **exactamente** con el ID del documento en
@@ -89,7 +90,8 @@ node --check server.js
 | `POST` | `/api/transferir-saldo` | Transferencia entre cuentas (transaccional) |
 | `GET` | `/api/historial-usuario` | Últimos 50 movimientos, en horario CDMX |
 | `POST` | `/api/crear-orden` | Crea sesión de Stripe Embedded Checkout |
-| `GET` | `/api/confirmar-pago` | Callback de Stripe: acredita monedas y redirige |
+| `POST` | `/api/stripe-webhook` | **Acreditación fiable.** Verifica la firma de Stripe |
+| `GET` | `/api/confirmar-pago` | Retorno del navegador: redirige y acredita como respaldo |
 
 ### Administración
 | Método | Ruta | Descripción |
@@ -125,6 +127,28 @@ juegos_hub/{id}        titulo · url · imgPoster · descripcion · estado
 
 El estado de las partidas **no se persiste**: vive en los objetos `salas`,
 `salasSerpientes` y `salasPirinola` en memoria.
+
+---
+
+## 💳 Pagos
+
+Las monedas se acreditan por **dos caminos**, y ambos son idempotentes: se reserva
+el `session_id` en `pagos_procesados` antes de tocar ningún saldo, así que da igual
+cuál llegue primero o si llegan los dos.
+
+1. **Webhook** (`POST /api/stripe-webhook`) — el fiable. Stripe lo reintenta durante
+   días hasta recibir un 200, así que el pago se acredita aunque el usuario cierre la
+   pestaña. Verifica la firma sobre el cuerpo crudo; por eso la ruta se registra
+   **antes** de `express.json()`.
+2. **Retorno del navegador** (`GET /api/confirmar-pago`) — redirige al usuario y
+   acredita por si el webhook aún no llegó.
+
+### Configurar el webhook en Stripe
+
+1. Dashboard de Stripe → **Developers** → **Webhooks** → **Add endpoint**
+2. URL: `https://loteria-backend-3nde.onrender.com/api/stripe-webhook`
+3. Eventos: `checkout.session.completed` y `checkout.session.async_payment_succeeded`
+4. Copia el **Signing secret** (`whsec_...`) y ponlo en Render como `STRIPE_WEBHOOK_SECRET`
 
 ---
 
@@ -198,5 +222,5 @@ camino viejo: pon `AUTH_ESTRICTA=true` en Render y queda cerrado.
 - [x] Mover `ADMIN_EMAIL` a variable de entorno
 - [ ] Estado de salas en Redis
 - [ ] Partir `server.js` en módulos por juego
-- [ ] Webhook de Stripe en lugar de confiar en el redirect de retorno
+- [x] Webhook de Stripe en lugar de confiar solo en el redirect de retorno
 - [ ] Evaluar migración a VPS propio
