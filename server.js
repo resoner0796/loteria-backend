@@ -78,7 +78,28 @@ function origenPermitido(origen, cb) {
     cb(null, false);
 }
 
-const io = require('socket.io')(http, { cors: { origin: origenPermitido } });
+const io = require('socket.io')(http, {
+    // `cors` solo cubre las peticiones HTTP del transporte polling.
+    cors: { origin: origenPermitido },
+
+    // Y esto cubre el resto. Un WebSocket NO está sujeto a la política de mismo
+    // origen del navegador: cualquier web puede abrir uno contra este servidor,
+    // así que con solo `cors` un cliente que fuera directo por websocket entraba
+    // sin pasar por ningún filtro. `allowRequest` corre en el handshake, antes de
+    // establecer la conexión, sea cual sea el transporte.
+    //
+    // El riesgo aquí era acotado porque la sesión viaja en un token que la web
+    // atacante no puede leer (está en el localStorage de otro origen), no en una
+    // cookie que el navegador adjunte solo. Aun así, no hay razón para aceptar
+    // conexiones de sitios ajenos.
+    allowRequest: (req, cb) => {
+        const origen = req.headers.origin;
+        if (!origen) return cb(null, true);            // apps nativas, scripts, health checks
+        if (ORIGENES.includes(origen)) return cb(null, true);
+        console.warn(`🚫 Socket de origen no permitido: ${origen}`);
+        cb(null, false);
+    }
+});
 
 app.use(cors({ origin: origenPermitido }));
 
