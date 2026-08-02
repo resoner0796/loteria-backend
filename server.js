@@ -1609,16 +1609,54 @@ io.on('connection', (socket) => {
     emitirContadores();
   });
 
-  socket.on('seleccionar-carta', ({ carta, sala }) => {
+  /** Prefijo con el que viajan las cartas compradas por el jugador. */
+  const PREFIJO_PROPIA = 'propia:';
+  const esPropia = (id) => typeof id === 'string' && id.startsWith(PREFIJO_PROPIA);
+
+  /**
+   * Las que se apartan para que nadie repita.
+   *
+   * Solo las 53 de siempre: esas son las mismas para todo el mundo. Una carta
+   * comprada es de una sola persona, así que apartarla no tendría sentido — y
+   * además su id revelaría a los demás qué cartas tiene.
+   */
+  const cartasQueSeApartan = (salaInfo) =>
+      Object.values(salaInfo.jugadores).flatMap(j => j.cartas).filter(c => !esPropia(c));
+
+  socket.on('seleccionar-carta', async ({ carta, sala }) => {
     const salaInfo = salas[sala];
-    if (salaInfo && salaInfo.jugadores[socket.id]) {
-      const jugador = salaInfo.jugadores[socket.id];
-      if (jugador.cartas.length < 4 && !jugador.cartas.includes(carta)) {
-        jugador.cartas.push(carta);
-        const cartasOcupadas = Object.values(salaInfo.jugadores).flatMap(j => j.cartas);
-        io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
+    if (!salaInfo || !salaInfo.jugadores[socket.id]) return;
+
+    const jugador = salaInfo.jugadores[socket.id];
+    if (jugador.cartas.length >= 4 || jugador.cartas.includes(carta)) return;
+
+    // Una carta propia hay que comprobarla: que exista y que sea de quien dice.
+    // Sin esto, cualquiera manda `propia:loquesea` y luego, al gritar lotería,
+    // envía las barajas que le convengan — las que acaban de cantarse, por
+    // ejemplo. Las barajas se guardan AQUÍ, leídas de Firestore, y son las que
+    // se usan para validar: las que mande el cliente se ignoran.
+    if (esPropia(carta)) {
+      const email = emailDeSocket(socket, null, 'seleccionar-carta');
+      if (!email) return;
+
+      try {
+        const idTabla = carta.slice(PREFIJO_PROPIA.length);
+        const doc = await db.collection('usuarios').doc(email)
+            .collection('tablas').doc(idTabla).get();
+        if (!doc.exists) {
+          console.warn(`⚠️ ${email} intentó usar una carta que no es suya: ${carta}`);
+          return socket.emit('error-apuesta', 'Esa carta no es tuya');
+        }
+        if (!jugador.barajasPropias) jugador.barajasPropias = {};
+        jugador.barajasPropias[carta] = doc.data().cartas;
+      } catch (e) {
+        console.error('Error comprobando carta propia:', e);
+        return;
       }
     }
+
+    jugador.cartas.push(carta);
+    io.to(sala).emit('cartas-desactivadas', cartasQueSeApartan(salaInfo));
   });
 
   socket.on('deseleccionar-carta', ({ carta, sala }) => {
@@ -1626,8 +1664,8 @@ io.on('connection', (socket) => {
     if (salaInfo && salaInfo.jugadores[socket.id]) {
       const jugador = salaInfo.jugadores[socket.id];
       jugador.cartas = jugador.cartas.filter(c => c !== carta);
-      const cartasOcupadas = Object.values(salaInfo.jugadores).flatMap(j => j.cartas);
-      io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
+      if (jugador.barajasPropias) delete jugador.barajasPropias[carta];
+      io.to(sala).emit('cartas-desactivadas', cartasQueSeApartan(salaInfo));
     }
   });
 
@@ -1759,6 +1797,7 @@ io.on('connection', (socket) => {
         salas[sala].velocidad = velocidad;
         salas[sala].reclamantes = [];
         salas[sala].validandoEmpate = false;
+        salas[sala].pausado = false;
         
         if(salas[sala].timerEmpate) clearTimeout(salas[sala].timerEmpate);
         
@@ -1780,12 +1819,40 @@ io.on('connection', (socket) => {
     }
 });
 
+  /**
+   * Pausa el canto sin tocar nada más.
+   *
+   * `juegoIniciado` se pone en false porque es lo que mira el intervalo para
+   * cortarse, pero la BARAJA y el HISTORIAL se quedan como están: eso es lo que
+   * permite reanudar por donde iba. Reiniciar aquí obligaría a barajear de nuevo
+   * y la partida se perdería.
+   */
   socket.on('detener-juego', (sala) => {
     if (salas[sala] && socket.id === salas[sala].hostId) {
       salas[sala].juegoIniciado = false;
+      salas[sala].pausado = true;
       if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
       io.to(sala).emit('juego-detenido');
     }
+  });
+
+  /**
+   * Sigue cantando desde donde se quedó.
+   *
+   * Solo si la partida estaba PAUSADA: si no, este evento serviría para arrancar
+   * una sin barajear ni cobrar, saltándose todo lo que hace 'iniciar-juego'.
+   */
+  socket.on('reanudar-juego', (sala) => {
+    const salaInfo = salas[sala];
+    if (!salaInfo || socket.id !== salaInfo.hostId) return;
+    if (!salaInfo.pausado || salaInfo.juegoIniciado) return;
+    if (!salaInfo.baraja || salaInfo.baraja.length === 0) return;
+
+    salaInfo.juegoIniciado = true;
+    salaInfo.pausado = false;
+    io.to(sala).emit('juego-reanudado');
+    io.to(sala).emit('corre');
+    repartirCartas(sala);
   });
 
   socket.on('barajear', (sala) => {
@@ -1821,6 +1888,19 @@ io.on('connection', (socket) => {
   socket.on('loteria', ({ nickname, sala, boardState }) => {
     if (!salas[sala]) return;
     const salaInfo = salas[sala];
+
+    // Las barajas de las cartas propias se sustituyen por las que guardó el
+    // servidor al seleccionarlas. El cliente manda las suyas para pintar, pero
+    // son justo el dato con el que se decide quién gana: si se aceptaran tal
+    // cual, bastaría con editar el evento y mandar las cartas ya cantadas.
+    const jugadorActual = salaInfo.jugadores[socket.id];
+    if (boardState && jugadorActual) {
+        boardState.propias = {};
+        (boardState.cards || []).forEach(id => {
+            const guardadas = jugadorActual.barajasPropias?.[id];
+            if (guardadas) boardState.propias[id] = guardadas;
+        });
+    }
     if (!salaInfo.juegoIniciado && !salaInfo.validandoEmpate) return;
     if (!salaInfo.validandoEmpate) {
         salaInfo.juegoIniciado = false;
