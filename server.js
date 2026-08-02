@@ -1640,7 +1640,9 @@ function procesarLoteria(sala, jugadorId, nickname, boardState, avisar = () => {
     // el juego sigue cantando. Antes bastaba con picar el botón de broma para
     // congelar a toda la sala hasta que el anfitrión resolviera.
     if (!veredicto.gano) {
-        avisar(veredicto.motivo);
+        // `barajaPerdida` va solo cuando se le pasó: es la que cerraba su
+        // figura, para poder enseñársela en vez de dejarlo adivinando cuál era.
+        avisar(veredicto.motivo, veredicto.barajaPerdida);
         return;
     }
 
@@ -2209,7 +2211,7 @@ io.on('connection', (socket) => {
 
   socket.on('loteria', ({ nickname, sala, boardState }) => {
     procesarLoteria(sala, socket.id, nickname, boardState,
-        (motivo) => socket.emit('loteria-rechazada', { motivo }));
+        (motivo, baraja) => socket.emit('loteria-rechazada', { motivo, baraja }));
   });
 
   socket.on('salir-sala', async (sala) => {

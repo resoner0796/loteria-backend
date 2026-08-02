@@ -337,6 +337,15 @@ seccion('Se te pasó: hay que gritar CON la baraja que cierra');
     ok('y da igual en qué orden estén las cartas',
         alReves.motivo === v.SE_TE_PASO, alReves.motivo);
 
+    // Y se dice CUÁL era la baraja que cerraba: saber que se te pasó sin saber
+    // cuál era es una mitad de aviso.
+    ok('dice con qué baraja debió gritar', tarde.barajaPerdida === 4,
+        `dijo: ${tarde.barajaPerdida}`);
+    ok('en carta llena también', llenaTarde.barajaPerdida === 16,
+        `dijo: ${llenaTarde.barajaPerdida}`);
+    ok('ganando no hay baraja perdida que enseñar',
+        !aTiempo.barajaPerdida);
+
     // La regla se puede apagar, que es lo que usan las pruebas de figuras.
     const sinRegla = v.evaluarReclamo({
         ...base, historial: ['01', '02', '03', '04', '50'], exigirUltima: false

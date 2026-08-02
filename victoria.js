@@ -151,7 +151,7 @@ function evaluarCarta(barajas, cantadas, marcadas, condicion = 'figura', ultima 
 
         // Tenía la carta llena pero no gritó a tiempo: se le pasó.
         if (faltan === 0 && sinFicha === 0) {
-            return { gano: false, motivo: SE_TE_PASO };
+            return { gano: false, motivo: SE_TE_PASO, casillasPerdidas: ocupadas };
         }
         return {
             gano: false,
@@ -174,16 +174,20 @@ function evaluarCarta(barajas, cantadas, marcadas, condicion = 'figura', ultima 
     // muy distinto de «no tenías nada», y es la diferencia entre un despiste y
     // alguien picando el botón por picarlo.
     let masCerca = 5;
-    let laTeniaTarde = false;
+    let laQueTenia = null;
     for (const figura of FIGURAS) {
         if (figura.casillas.some(i => barajas[i] === null || barajas[i] === undefined)) continue;
         const puestas = figura.casillas.filter(i => estaCantada(barajas[i], cantadas) && conFicha.has(i)).length;
-        if (puestas === figura.casillas.length) laTeniaTarde = true;
+        if (puestas === figura.casillas.length && !laQueTenia) laQueTenia = figura;
         masCerca = Math.min(masCerca, figura.casillas.length - puestas);
     }
 
-    // La figura estaba completa: lo que falló fue el momento, no la carta.
-    if (laTeniaTarde) return { gano: false, motivo: SE_TE_PASO };
+    // La figura estaba completa: lo que falló fue el momento, no la carta. Se
+    // devuelven sus casillas para poder decirle CON CUÁL debió gritar — saber
+    // que se te pasó sin saber cuál era es una mitad de aviso.
+    if (laQueTenia) {
+        return { gano: false, motivo: SE_TE_PASO, casillasPerdidas: laQueTenia.casillas };
+    }
 
     return {
         gano: false,
@@ -231,6 +235,7 @@ function evaluarReclamo({ cartas, marcadas, historial, modo, exigirUltima = true
     // gritó tarde es contarle otra partida.
     let mejorMotivo = 'No completaste ninguna figura';
     let seLePaso = false;
+    let barajaPerdida = null;
 
     for (const [id, barajas] of Object.entries(cartas || {})) {
         const r = evaluarCarta(barajas, cantadas, (marcadas || {})[id], condicion, ultima);
@@ -254,10 +259,23 @@ function evaluarReclamo({ cartas, marcadas, historial, modo, exigirUltima = true
                     estaCantada(barajas[i], cantadas) && new Set((marcadas[id] || []).map(Number)).has(i))
             };
         }
-        if (r.motivo === SE_TE_PASO) seLePaso = true;
-        else if (r.motivo && !seLePaso) mejorMotivo = r.motivo;
+        if (r.motivo === SE_TE_PASO) {
+            seLePaso = true;
+            // La que cerraba esa figura: de sus barajas, la que salió más tarde.
+            if (!barajaPerdida && r.casillasPerdidas) {
+                barajaPerdida = r.casillasPerdidas
+                    .map(i => Number(barajas[i]))
+                    .reduce((a, b) => ((turno.get(b) ?? -1) > (turno.get(a) ?? -1) ? b : a));
+            }
+        } else if (r.motivo && !seLePaso) {
+            mejorMotivo = r.motivo;
+        }
     }
-    return { gano: false, motivo: seLePaso ? SE_TE_PASO : mejorMotivo };
+    return {
+        gano: false,
+        motivo: seLePaso ? SE_TE_PASO : mejorMotivo,
+        barajaPerdida: seLePaso ? barajaPerdida : null
+    };
 }
 
 /** Cómo se llama cada figura de cara a la gente. */
