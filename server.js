@@ -1868,7 +1868,12 @@ io.on('connection', (socket) => {
                   tabla: String(tablaGanadora),
                   fichas: candidato.boardState?.chips?.[String(tablaGanadora)] || [],
                   skin: candidato.boardState?.skin || null,
-                  nickname: candidato.nickname
+                  nickname: candidato.nickname,
+                  // Si la carta ganadora es PROPIA, sus 16 barajas viajan con la
+                  // prueba. Nadie más de la sala las tiene —son de quien la
+                  // compró— así que sin esto la prueba saldría en blanco justo
+                  // en el momento en que se enseña quién ganó.
+                  barajas: candidato.boardState?.propias?.[String(tablaGanadora)] || null
               };
           }
       }
