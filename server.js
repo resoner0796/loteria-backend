@@ -390,6 +390,14 @@ const CATALOGO_ITEMS = {
 const PACK_TABLAS = { precio: 20, cuantas: 4 };
 
 /**
+ * Lo que cuesta una tabla hecha a mano.
+ *
+ * Se paga más que las del pack porque eliges tú qué lleva: en el pack salen
+ * cuatro por 20 (cinco cada una) y aquí eliges una sola.
+ */
+const TABLA_PERSONALIZADA = { precio: 25 };
+
+/**
  * Tope de tablas guardadas por persona.
  *
  * Sin tope, comprar packs sin parar llena el documento del usuario y la
@@ -2023,6 +2031,62 @@ io.on('connection', (socket) => {
           socket.emit('mis-tablas', await tablasDe(email));
       } catch (e) {
           console.error('Error leyendo tablas:', e);
+      }
+  });
+
+  socket.on('comprar-tabla-personalizada', async ({ cartas, modo }) => {
+      const email = emailDeSocket(socket, null, 'comprar-tabla-personalizada');
+      if (!email) return;
+
+      // El navegador ya avisa mientras se arma la tabla, pero eso es comodidad:
+      // este evento se puede mandar a mano desde la consola. Aquí se comprueba
+      // TODO otra vez, porque de esto depende que la tabla sea jugable.
+      const revision = generador.validarTablaManual(cartas, modo);
+      if (!revision.ok) return socket.emit('error-pack', revision.motivo);
+
+      try {
+          const yaTiene = await tablasDe(email);
+          if (yaTiene.length >= TOPE_TABLAS_POR_USUARIO) {
+              return socket.emit('error-pack',
+                  `Ya tienes ${yaTiene.length} tablas. El máximo son ${TOPE_TABLAS_POR_USUARIO}.`);
+          }
+
+          const firma = generador.firmaDeTabla(revision.cartas);
+          if (yaTiene.some(t => t.firma === firma)) {
+              return socket.emit('error-pack', 'Ya tienes una tabla con esas mismas cartas');
+          }
+
+          const userRef = db.collection('usuarios').doc(email);
+          await db.runTransaction(async (t) => {
+              const doc = await t.get(userRef);
+              if (!doc.exists) throw new Error('Usuario no existe');
+              if ((doc.data().monedas || 0) < TABLA_PERSONALIZADA.precio) throw new Error('SALDO');
+              t.update(userRef, {
+                  monedas: admin.firestore.FieldValue.increment(-TABLA_PERSONALIZADA.precio)
+              });
+          });
+
+          await userRef.collection('tablas').add({
+              cartas: revision.cartas,
+              modo,
+              firma,
+              personalizada: true,
+              creada: admin.firestore.FieldValue.serverTimestamp()
+          });
+
+          await registrarMovimiento(email, 'compra', TABLA_PERSONALIZADA.precio,
+              `Tabla personalizada (${modo})`, false);
+
+          socket.emit('usuario-actualizado', perfilPublico((await userRef.get()).data()));
+          socket.emit('mis-tablas', await tablasDe(email));
+          socket.emit('tabla-personalizada-creada');
+
+      } catch (e) {
+          if (e.message === 'SALDO') {
+              return socket.emit('error-pack', `Necesitas $${TABLA_PERSONALIZADA.precio} monedas`);
+          }
+          console.error('Error creando tabla personalizada:', e);
+          socket.emit('error-pack', 'No se pudo crear la tabla');
       }
   });
 

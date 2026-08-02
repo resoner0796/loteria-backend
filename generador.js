@@ -155,3 +155,79 @@ module.exports = {
     CASILLAS, TOTAL_BARAJAS, MODOS, CASILLAS_ESQUINAS, CASILLAS_DOBLE,
     barajar, generarTabla, generarPack, firmaDeTabla
 };
+
+
+/**
+ * Comprueba una tabla que arma la persona a mano.
+ *
+ * El navegador ya avisa mientras se construye, pero eso es comodidad, no
+ * seguridad: quien quiera puede mandar el evento a mano desde la consola. Aquí
+ * se vuelve a mirar TODO, porque de esto depende que una tabla sea jugable y
+ * llegue a repartir dinero.
+ *
+ * Devuelve `{ ok: true, cartas }` con la tabla ya normalizada, o
+ * `{ ok: false, motivo }`.
+ */
+function validarTablaManual(cartas, modo = 'normal') {
+    if (!MODOS.includes(modo)) {
+        return { ok: false, motivo: 'Ese tipo de tabla no existe' };
+    }
+    if (!Array.isArray(cartas) || cartas.length !== CASILLAS) {
+        return { ok: false, motivo: `Una tabla son ${CASILLAS} casillas` };
+    }
+
+    // Se normaliza antes de mirar nada: por la red pueden llegar cadenas
+    // ("12") o undefined, y comparar sin normalizar deja pasar duplicados.
+    const limpias = cartas.map(c => {
+        if (c === null || c === undefined || c === '') return null;
+        const n = Number(c);
+        return Number.isInteger(n) ? n : NaN;
+    });
+
+    if (limpias.some(c => Number.isNaN(c))) {
+        return { ok: false, motivo: 'Hay casillas con algo que no es una carta' };
+    }
+    if (limpias.some(c => c !== null && (c < 1 || c > TOTAL_BARAJAS))) {
+        return { ok: false, motivo: `Las cartas van de 1 a ${TOTAL_BARAJAS}` };
+    }
+
+    const puestas = limpias.filter(c => c !== null);
+
+    if (modo === 'normal') {
+        if (puestas.length !== CASILLAS) {
+            return { ok: false, motivo: 'Faltan casillas por llenar' };
+        }
+        if (new Set(puestas).size !== puestas.length) {
+            return { ok: false, motivo: 'No puedes repetir una carta' };
+        }
+    }
+
+    if (modo === 'esquinas') {
+        const ocupadas = limpias.map((c, i) => c !== null ? i : null).filter(i => i !== null);
+        if (JSON.stringify(ocupadas) !== JSON.stringify(CASILLAS_ESQUINAS)) {
+            return { ok: false, motivo: 'En este tipo solo se llenan las esquinas y el centro' };
+        }
+        if (new Set(puestas).size !== puestas.length) {
+            return { ok: false, motivo: 'No puedes repetir una carta' };
+        }
+    }
+
+    if (modo === 'dobles') {
+        if (puestas.length !== CASILLAS) {
+            return { ok: false, motivo: 'Faltan casillas por llenar' };
+        }
+        const [a, b] = CASILLAS_DOBLE;
+        if (limpias[a] === null || limpias[a] !== limpias[b]) {
+            return { ok: false, motivo: 'Las dos del centro tienen que ser la misma carta' };
+        }
+        // Quitando una de las dos del centro, el resto no puede repetirse.
+        const sinLaSegunda = limpias.filter((_, i) => i !== b);
+        if (new Set(sinLaSegunda).size !== sinLaSegunda.length) {
+            return { ok: false, motivo: 'Solo puede repetirse la carta del centro' };
+        }
+    }
+
+    return { ok: true, cartas: limpias };
+}
+
+module.exports.validarTablaManual = validarTablaManual;

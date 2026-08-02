@@ -124,6 +124,57 @@ seccion('Un modo que no existe no devuelve basura');
     ok('lanza error en vez de devolver una tabla rara', reventó);
 }
 
+// ==================== TABLAS HECHAS A MANO ====================
+
+seccion('Tablas personalizadas: el servidor las revisa enteras');
+{
+    // El navegador ya avisa al armarlas, pero este evento se puede mandar a mano
+    // desde la consola. Lo que se comprueba aquí es lo único que cuenta.
+    const llena = Array.from({ length: 16 }, (_, i) => i + 1);
+
+    ok('acepta una normal completa y sin repetidas',
+        g.validarTablaManual(llena, 'normal').ok);
+
+    ok('rechaza una carta repetida',
+        !g.validarTablaManual([1, 1, ...llena.slice(2)], 'normal').ok);
+
+    ok('rechaza si falta alguna casilla',
+        !g.validarTablaManual([null, ...llena.slice(1)], 'normal').ok);
+
+    ok('rechaza cartas fuera de la baraja',
+        !g.validarTablaManual([55, ...llena.slice(1)], 'normal').ok);
+
+    ok('rechaza lo que no sea un número',
+        !g.validarTablaManual(['<script>', ...llena.slice(1)], 'normal').ok);
+
+    ok('rechaza si no son 16 casillas',
+        !g.validarTablaManual(llena.slice(0, 15), 'normal').ok);
+
+    ok('acepta números que llegan como texto',
+        g.validarTablaManual(llena.map(String), 'normal').ok);
+
+    // Esquinas: solo valen las casillas del patrón
+    const esq = new Array(16).fill(null);
+    g.CASILLAS_ESQUINAS.forEach((c, i) => { esq[c] = i + 1; });
+    ok('acepta esquinas en su sitio', g.validarTablaManual(esq, 'esquinas').ok);
+
+    const esqMal = new Array(16).fill(null);
+    [0, 1, 2, 3, 4, 5, 6, 7].forEach((c, i) => { esqMal[c] = i + 1; });
+    ok('rechaza esquinas puestas donde no van',
+        !g.validarTablaManual(esqMal, 'esquinas').ok);
+
+    // Dobles: las dos del centro tienen que coincidir
+    const dobles = [1, 2, 3, 4, 5, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    ok('acepta dobles con el centro igual', g.validarTablaManual(dobles, 'dobles').ok);
+
+    const doblesMal = [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+    ok('rechaza dobles con el centro distinto',
+        !g.validarTablaManual(doblesMal, 'dobles').ok);
+
+    ok('rechaza un modo que no existe',
+        !g.validarTablaManual(llena, 'inventado').ok);
+}
+
 // ==================== RESULTADO ====================
 
 console.log('\n' + '═'.repeat(62));
