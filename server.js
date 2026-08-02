@@ -1577,11 +1577,13 @@ async function cerrarRonda(sala) {
     io.to(sala).emit('ganadores-multiples', {
         ganadores: ganadoresReales.map(g => g.nickname),
         premio: premioPorCabeza,
-        prueba: salaInfo.pruebaVictoria || null,
+        // Una por ganador: en un empate se enseñan todas, para que la sala vea
+        // con qué ganó cada quien y no tenga que fiarse. Antes había una sola
+        // por sala y se guardaba la del primero que gritara.
+        pruebas: ganadoresReales.map(g => g.prueba).filter(Boolean),
         pozoGanado: pozoPagado,
         ganadorPozo: quienGanoElPozo
     });
-    salaInfo.pruebaVictoria = null;
     io.to(sala).emit('pozo-actualizado', salaInfo.pozoAcumulado || 0);
     io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores); // Aquí se envían las nuevas rachas
     io.to(sala).emit('bote-actualizado', 0);
@@ -1646,7 +1648,24 @@ function procesarLoteria(sala, jugadorId, nickname, boardState, avisar = () => {
         return;
     }
 
-    const reclamante = { id: jugadorId, nickname, boardState, status: 'validado', veredicto };
+    // La prueba de ESTE ganador viaja con él. Antes había una sola por sala y
+    // se guardaba solo la del primero: en un empate, la sala veía una carta y
+    // se quedaba sin saber con qué ganaron los demás.
+    const reclamante = {
+        id: jugadorId, nickname, boardState, status: 'validado', veredicto,
+        prueba: {
+            tabla: veredicto.carta,
+            fichas: boardState?.chips?.[veredicto.carta] || [],
+            skin: boardState?.skin || null,
+            nickname,
+            barajas: cartas[veredicto.carta] || null,
+            figura: veredicto.tipo,
+            casillas: veredicto.casillas,
+            // Con cuál cerró: la de la figura que salió más tarde. Es la que la
+            // gente recuerda — «gané con el gallo».
+            barajaFinal: veredicto.barajaFinal
+        }
+    };
 
     // El pozo acumulado se lleva por llenar las cuatro del centro, y solo si esa
     // persona aportó en esta ronda: quien no se apuntó queda fuera aunque haya
@@ -1658,21 +1677,6 @@ function procesarLoteria(sala, jugadorId, nickname, boardState, avisar = () => {
         salaInfo.validandoEmpate = true;
         if (salaInfo.intervaloCartas) clearInterval(salaInfo.intervaloCartas);
         salaInfo.reclamantes.push(reclamante);
-
-        // La prueba que ve la sala: la carta ganadora con sus fichas, la figura
-        // que se completó y la baraja con la que se cerró.
-        salaInfo.pruebaVictoria = {
-            tabla: veredicto.carta,
-            fichas: boardState?.chips?.[veredicto.carta] || [],
-            skin: boardState?.skin || null,
-            nickname,
-            barajas: cartas[veredicto.carta] || null,
-            figura: veredicto.tipo,
-            casillas: veredicto.casillas,
-            // Con cuál cerró: la de la figura que salió más tarde. Es la que la
-            // gente recuerda —«gané con el gallo»— y hasta ahora no se sabía.
-            barajaFinal: veredicto.barajaFinal
-        };
 
         // La pausa se mantiene aunque ya no haya nada que juzgar: es para
         // recoger a quien complete su figura con la MISMA baraja. Sin ella, el
