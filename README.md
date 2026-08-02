@@ -171,8 +171,14 @@ Hoy, al recibir `loteria`:
    haber tapado.
 3. Se buscan las **20 figuras**: 4 horizontales, 4 verticales, 2 diagonales, las
    4 esquinas y los 9 cuadros de 2×2. Se generan, no se escriben a mano.
-4. Sin figura → `loteria-rechazada` solo a quien gritó, **y el juego sigue**.
-   Con figura → pausa de empates y `cerrarRonda()` reparte.
+4. La figura tiene que incluir **la última baraja cantada**: si se te pasó el
+   momento ya no vale, como en la mesa de verdad. Se apaga con
+   `exigirUltima: false`, que es lo que usan las pruebas de las figuras en sí.
+5. Sin figura → `loteria-rechazada` solo a quien gritó, **y el juego sigue**. El
+   motivo sale de la carta que estuvo MÁS cerca, no de la última que se mire:
+   con cuatro cartas en la mesa, decir «te faltan tres» a quien tenía la figura
+   hecha es contarle otra partida.
+6. Con figura → pausa de empates y `cerrarRonda()` reparte.
 
 ⚠️ **Lo que decide el dinero es que la baraja esté CANTADA**, y eso lo sabe el
 servidor. Las fichas las manda el navegador y podrían falsearse, pero mentir ahí

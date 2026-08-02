@@ -308,6 +308,35 @@ seccion('Se te pasó: hay que gritar CON la baraja que cierra');
     });
     ok('pero con la última sí', llenaATiempo.gano);
 
+    // Con VARIAS cartas en la mesa, el aviso sale de la que estuvo a punto.
+    // Este es el fallo real: se guardaba el motivo de la ÚLTIMA carta mirada, y
+    // el «se te pasó» de la primera quedaba pisado por un «te faltan tres» de
+    // otra que no tenía nada. En la mesa se juega con hasta cuatro.
+    const conVariasCartas = v.evaluarReclamo({
+        cartas: {
+            '01': CARTA,
+            '02': Array.from({ length: 16 }, (_, i) => i + 30)   // barajas 30..45
+        },
+        marcadas: { '01': [0, 1, 2, 3], '02': [0] },
+        historial: ['01', '02', '03', '04', '50'],
+        modo: 'tradicional'
+    });
+    ok('con varias cartas, el aviso sale de la que estuvo a punto',
+        conVariasCartas.motivo === v.SE_TE_PASO, conVariasCartas.motivo);
+
+    // Y da igual el orden en que se miren.
+    const alReves = v.evaluarReclamo({
+        cartas: {
+            '02': Array.from({ length: 16 }, (_, i) => i + 30),
+            '01': CARTA
+        },
+        marcadas: { '01': [0, 1, 2, 3], '02': [0] },
+        historial: ['01', '02', '03', '04', '50'],
+        modo: 'tradicional'
+    });
+    ok('y da igual en qué orden estén las cartas',
+        alReves.motivo === v.SE_TE_PASO, alReves.motivo);
+
     // La regla se puede apagar, que es lo que usan las pruebas de figuras.
     const sinRegla = v.evaluarReclamo({
         ...base, historial: ['01', '02', '03', '04', '50'], exigirUltima: false

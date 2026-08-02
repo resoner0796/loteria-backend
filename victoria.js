@@ -225,7 +225,12 @@ function evaluarReclamo({ cartas, marcadas, historial, modo, exigirUltima = true
         if (!turno.has(n)) turno.set(n, i);
     });
 
+    // El motivo que se enseña sale de la carta MÁS cerca de ganar, no de la
+    // última que se mire. Con cuatro cartas en la mesa, la que estuvo a punto es
+    // la que interesa: decir «te faltan tres» a quien tenía la figura hecha y
+    // gritó tarde es contarle otra partida.
     let mejorMotivo = 'No completaste ninguna figura';
+    let seLePaso = false;
 
     for (const [id, barajas] of Object.entries(cartas || {})) {
         const r = evaluarCarta(barajas, cantadas, (marcadas || {})[id], condicion, ultima);
@@ -249,9 +254,10 @@ function evaluarReclamo({ cartas, marcadas, historial, modo, exigirUltima = true
                     estaCantada(barajas[i], cantadas) && new Set((marcadas[id] || []).map(Number)).has(i))
             };
         }
-        if (r.motivo) mejorMotivo = r.motivo;
+        if (r.motivo === SE_TE_PASO) seLePaso = true;
+        else if (r.motivo && !seLePaso) mejorMotivo = r.motivo;
     }
-    return { gano: false, motivo: mejorMotivo };
+    return { gano: false, motivo: seLePaso ? SE_TE_PASO : mejorMotivo };
 }
 
 /** Cómo se llama cada figura de cara a la gente. */
