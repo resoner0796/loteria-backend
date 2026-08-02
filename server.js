@@ -257,6 +257,7 @@ app.use('/api/', limitador(1, 200, 'Vas demasiado rápido. Espera un momento.'))
 // Cerrar la puerta es cambiar MODO_ESTRICTO a true, una vez que los contadores
 // de /api/admin/uso-heredado se queden en cero.
 const jwt = require('jsonwebtoken');
+const generador = require('./generador');
 
 const MODO_ESTRICTO = process.env.AUTH_ESTRICTA === 'true';
 const VIGENCIA_TOKEN = '30d';
@@ -380,6 +381,29 @@ const CATALOGO_ITEMS = {
     skin_bill: 5, skin_snake: 5, skin_alien: 5, skin_ninja: 5,
     skin_boy: 5, skin_girl: 5, skin_hat: 5, skin_crown: 5
 };
+
+/**
+ * Lo que cuesta un pack de tablas generadas, y cuántas trae.
+ *
+ * Igual que el resto de precios: el cliente dice QUÉ quiere, nunca cuánto vale.
+ */
+const PACK_TABLAS = { precio: 20, cuantas: 4 };
+
+/**
+ * Tope de tablas guardadas por persona.
+ *
+ * Sin tope, comprar packs sin parar llena el documento del usuario y la
+ * pantalla de «Mis Cartas» se vuelve inmanejable. Al llegar aquí se avisa en vez
+ * de cobrar.
+ */
+const TOPE_TABLAS_POR_USUARIO = 40;
+
+/** Las tablas generadas de alguien, de la más nueva a la más vieja. */
+async function tablasDe(email) {
+    const snap = await db.collection('usuarios').doc(email)
+        .collection('tablas').orderBy('creada', 'desc').get();
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
 
 /**
  * Normaliza un monto que llega del cliente y devuelve null si no sirve.
@@ -1984,6 +2008,85 @@ io.on('connection', (socket) => {
 // =========================================================
   // 🛒 TIENDA GENERAL (LOTERÍA: SONIDOS Y FICHAS) 🛒
   // =========================================================
+
+  // =========================================================
+  // TABLAS GENERADAS
+  // =========================================================
+  // Las tablas que se venden en packs. Se generan AQUÍ, nunca en el navegador:
+  // si el cliente decidiera qué lleva su tabla, el día que el servidor valide
+  // las loterías solo, cualquiera se haría una con las cartas ya cantadas.
+
+  socket.on('solicitar-mis-tablas', async () => {
+      const email = emailDeSocket(socket, null, 'solicitar-mis-tablas');
+      if (!email) return;
+      try {
+          socket.emit('mis-tablas', await tablasDe(email));
+      } catch (e) {
+          console.error('Error leyendo tablas:', e);
+      }
+  });
+
+  socket.on('comprar-pack-tablas', async ({ modo }) => {
+      const email = emailDeSocket(socket, null, 'comprar-pack-tablas');
+      if (!email) return;
+
+      // El modo lo elige quien compra, pero de una lista cerrada: con uno
+      // inventado, generarTabla lanzaría y la compra quedaría a medias.
+      if (!generador.MODOS.includes(modo)) {
+          return socket.emit('error-pack', 'Ese tipo de tablas no existe');
+      }
+
+      try {
+          const yaTiene = await tablasDe(email);
+          if (yaTiene.length + PACK_TABLAS.cuantas > TOPE_TABLAS_POR_USUARIO) {
+              return socket.emit('error-pack',
+                  `Ya tienes ${yaTiene.length} tablas. El máximo son ${TOPE_TABLAS_POR_USUARIO}.`);
+          }
+
+          // El cobro va en transacción, como el resto de compras: sin ella, dos
+          // clics seguidos cobran una vez y entregan dos packs.
+          const userRef = db.collection('usuarios').doc(email);
+          await db.runTransaction(async (t) => {
+              const doc = await t.get(userRef);
+              if (!doc.exists) throw new Error('Usuario no existe');
+              if ((doc.data().monedas || 0) < PACK_TABLAS.precio) throw new Error('SALDO');
+              t.update(userRef, {
+                  monedas: admin.firestore.FieldValue.increment(-PACK_TABLAS.precio)
+              });
+          });
+
+          // Ya cobrado: se generan y se guardan. Las nuevas no repiten ninguna
+          // de las que ya tenía.
+          const firmas = yaTiene.map(t => t.firma).filter(Boolean);
+          const nuevas = generador.generarPack(PACK_TABLAS.cuantas, modo, firmas);
+
+          const lote = db.batch();
+          nuevas.forEach(cartas => {
+              const ref = userRef.collection('tablas').doc();
+              lote.set(ref, {
+                  cartas,
+                  modo,
+                  firma: generador.firmaDeTabla(cartas),
+                  creada: admin.firestore.FieldValue.serverTimestamp()
+              });
+          });
+          await lote.commit();
+
+          await registrarMovimiento(email, 'compra', PACK_TABLAS.precio,
+              `Pack de ${PACK_TABLAS.cuantas} tablas (${modo})`, false);
+
+          socket.emit('usuario-actualizado', perfilPublico((await userRef.get()).data()));
+          socket.emit('mis-tablas', await tablasDe(email));
+          socket.emit('pack-comprado', { cuantas: PACK_TABLAS.cuantas, modo });
+
+      } catch (e) {
+          if (e.message === 'SALDO') {
+              return socket.emit('error-pack', `Necesitas $${PACK_TABLAS.precio} monedas`);
+          }
+          console.error('Error comprando pack:', e);
+          socket.emit('error-pack', 'No se pudo completar la compra');
+      }
+  });
 
   socket.on('comprar-item', async ({ email, itemId }) => {
       email = emailDeSocket(socket, email, 'comprar-item');
