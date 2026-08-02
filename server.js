@@ -1405,19 +1405,39 @@ const { randomInt } = require('crypto');
 const alAzar = (tope) => randomInt(tope);
 
 // ==================== CONFIGURACIÓN DE MODOS ====================
+// Las cartas del sistema: las que ve todo el mundo en la pantalla de selección.
+//
+// Ya no son imágenes, son DATOS: cada carta es una lista de 16 números (con null
+// en las casillas vacías del modo esquinas). Las genera a mano
+// `scripts/generar-cartas-sistema.js` y el resultado está commiteado, porque
+// tienen que ser las mismas para todos y no cambiar entre despliegues.
+//
+// Que el servidor las tenga es lo que abre la puerta a validar una lotería sin
+// que el anfitrión mire: aquí se sabe exactamente qué lleva cada carta.
+const CARTAS_SISTEMA = require('./cartas-sistema.json');
+
 const MODOS_JUEGO = {
     // OJO con la terminología, que se presta a confusión:
-    //   - "tabla"  = lo que elige el jugador (assets/imagenes/cartas/, 53 en total)
-    //   - "carta"  = lo que se canta (assets/imagenes/barajas/, 54 en total)
-    // Son dos conjuntos distintos: hay 53 tablas y una baraja de 54 cartas.
+    //   - "carta"  = la rejilla de 4×4 que elige el jugador
+    //   - "baraja" = cada una de las 54 que se cantan
+    // Son dos conjuntos distintos, y son los nombres que ve la gente que juega.
+    // En sitios antiguos del código «tabla» significa lo mismo que «carta».
     //
-    // `tablasDisponibles` es informativo: hoy no lo lee nadie, el conteo real lo
-    // hace el frontend al pintar el grid de selección. Se deja documentado para
-    // que el número correcto viva junto a la definición del modo.
-    'tradicional': { costo: 1, tablasDisponibles: 53 },
-    'llena':       { costo: 2, tablasDisponibles: 53 },
-    'pozo':        { costo: 2, tablasDisponibles: 20 }
+    // `conjunto` dice de cuál de los dos grupos de `cartas-sistema.json` se sirve
+    // el modo. El Pozo usa cartas de ocho casillas —cuatro esquinas y el centro—
+    // y los otros dos las llenan enteras.
+    'tradicional': { costo: 1, conjunto: 'normal' },
+    'llena':       { costo: 2, conjunto: 'normal' },
+    'pozo':        { costo: 2, conjunto: 'esquinas' }
 };
+
+/** Las cartas del sistema que le tocan a un modo, listas para mandar al cliente. */
+const cartasDelModo = (modo) =>
+    CARTAS_SISTEMA.conjuntos[MODOS_JUEGO[modo]?.conjunto] || [];
+
+/** Las 16 barajas de una carta del sistema, o null si ese id no existe. */
+const barajasDeCartaSistema = (modo, id) =>
+    cartasDelModo(modo).find(c => c.id === String(id))?.cartas || null;
 
 // Función baraja SIEMPRE 54 (No importa el modo)
 function mezclarBaraja() {
@@ -1596,7 +1616,15 @@ io.on('connection', (socket) => {
     // necesita enterarse.
     socket.emit('info-sala', {
         modo: salas[sala].modoJuego,
-        costo: salas[sala].costoCarta
+        costo: salas[sala].costoCarta,
+        // Las cartas del modo viajan aquí, con sus barajas, para que el cliente
+        // pinte la pantalla de selección. Son unos 2 KB de números; mandarlas
+        // con el resto de la información de la sala evita otro viaje de ida y
+        // vuelta justo cuando la persona está esperando a ver algo.
+        //
+        // Que el cliente las conozca no es un problema: son públicas, las mismas
+        // para todos, y quien gana se decide con las que tiene el servidor.
+        cartas: cartasDelModo(salas[sala].modoJuego)
     });
 
     const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
@@ -1704,6 +1732,21 @@ io.on('connection', (socket) => {
           } else {
               socket.emit('rol-asignado', { host: false });
           }
+
+          // La información de la sala va ANTES que el tablero, y el orden
+          // importa: aquí viajan las cartas del modo con sus barajas, y sin
+          // ellas el cliente no sabe pintar nada. Al recargar la página se
+          // pierde todo lo que tenía en memoria.
+          //
+          // Antes no hacía falta porque una carta era un JPG y su nombre bastaba
+          // para pedirla. Eso escondía un fallo: al recargar en una sala de
+          // Pozo, el modo volvía al valor por defecto y se pintaban las cartas
+          // del set que no era.
+          socket.emit('info-sala', {
+              modo: salas[sala].modoJuego,
+              costo: salas[sala].costoCarta,
+              cartas: cartasDelModo(salas[sala].modoJuego)
+          });
 
           // LE DEVOLVEMOS SU TABLERO (Estado Restaurado)
           // Esto hace que el frontend vuelva a pintar sus cartas seleccionadas
@@ -1889,15 +1932,20 @@ io.on('connection', (socket) => {
     if (!salas[sala]) return;
     const salaInfo = salas[sala];
 
-    // Las barajas de las cartas propias se sustituyen por las que guardó el
-    // servidor al seleccionarlas. El cliente manda las suyas para pintar, pero
-    // son justo el dato con el que se decide quién gana: si se aceptaran tal
-    // cual, bastaría con editar el evento y mandar las cartas ya cantadas.
+    // Las barajas de cada carta las pone el SERVIDOR, nunca el cliente. El
+    // navegador manda las suyas para pintar, pero son justo el dato con el que
+    // se decide quién gana: si se aceptaran tal cual, bastaría con editar el
+    // evento y mandar las barajas ya cantadas.
+    //
+    // Salen de dos sitios según de quién sea la carta. Las del sistema están en
+    // `cartas-sistema.json`, iguales para todos; las compradas se guardaron al
+    // seleccionarlas, leídas de Firestore.
     const jugadorActual = salaInfo.jugadores[socket.id];
     if (boardState && jugadorActual) {
         boardState.propias = {};
         (boardState.cards || []).forEach(id => {
-            const guardadas = jugadorActual.barajasPropias?.[id];
+            const guardadas = jugadorActual.barajasPropias?.[id]
+                           || barajasDeCartaSistema(salaInfo.modoJuego, id);
             if (guardadas) boardState.propias[id] = guardadas;
         });
     }
@@ -1949,10 +1997,10 @@ io.on('connection', (socket) => {
                   fichas: candidato.boardState?.chips?.[String(tablaGanadora)] || [],
                   skin: candidato.boardState?.skin || null,
                   nickname: candidato.nickname,
-                  // Si la carta ganadora es PROPIA, sus 16 barajas viajan con la
-                  // prueba. Nadie más de la sala las tiene —son de quien la
-                  // compró— así que sin esto la prueba saldría en blanco justo
-                  // en el momento en que se enseña quién ganó.
+                  // Las 16 barajas de la carta ganadora viajan con la prueba,
+                  // puestas por el servidor. Es lo que se pinta para enseñar a
+                  // toda la sala con qué se ganó: ya no hay una imagen que
+                  // buscar por su nombre, una carta son sus barajas.
                   barajas: candidato.boardState?.propias?.[String(tablaGanadora)] || null
               };
           }
