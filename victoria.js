@@ -176,16 +176,35 @@ function evaluarReclamo({ cartas, marcadas, historial, modo }) {
     // en lugar de normalizar dentro de los bucles.
     const cantadas = new Set((historial || []).map(Number));
 
+    // En qué turno salió cada baraja, para saber cuál cerró la figura. El
+    // historial se llena por el final, así que el número más alto es la más
+    // reciente. Se guarda la PRIMERA vez que salió: una baraja no se repite en
+    // una partida, pero si el historial se reiniciara a medias, quedarse con la
+    // primera evita señalar un turno que no fue.
+    const turno = new Map();
+    (historial || []).forEach((b, i) => {
+        const n = Number(b);
+        if (!turno.has(n)) turno.set(n, i);
+    });
+
     let mejorMotivo = 'No completaste ninguna figura';
 
     for (const [id, barajas] of Object.entries(cartas || {})) {
         const r = evaluarCarta(barajas, cantadas, (marcadas || {})[id], condicion);
         if (r.gano) {
+            // Con cuál se cerró: de las barajas de la figura, la que salió más
+            // tarde. Es la que la gente recuerda —«gané con el gallo»— y hasta
+            // ahora no se sabía, porque el anfitrión validaba de un vistazo.
+            const barajaFinal = r.casillas
+                .map(i => Number(barajas[i]))
+                .reduce((a, b) => ((turno.get(b) ?? -1) > (turno.get(a) ?? -1) ? b : a));
+
             return {
                 gano: true,
                 carta: id,
                 tipo: r.tipo,
                 casillas: r.casillas,
+                barajaFinal,
                 // El Pozo acumulado es aparte de ganar la partida: se lleva
                 // llenando las cuatro del centro, tenga la forma que tenga.
                 ganoCentro: CENTRO.every(i =>

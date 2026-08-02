@@ -259,6 +259,7 @@ app.use('/api/', limitador(1, 200, 'Vas demasiado rápido. Espera un momento.'))
 const jwt = require('jsonwebtoken');
 const generador = require('./generador');
 const { evaluarReclamo, NOMBRE_FIGURA } = require('./victoria');
+const bots = require('./bots');
 
 const MODO_ESTRICTO = process.env.AUTH_ESTRICTA === 'true';
 const VIGENCIA_TOKEN = '30d';
@@ -1480,7 +1481,206 @@ function repartirCartas(sala) {
     const carta = salaInfo.baraja.shift();
     salaInfo.historial.push(carta);
     io.to(sala).emit('carta-cantada', carta);
+
+    // Los bots la oyen igual que todo el mundo. Van tapando con retardo y se
+    // les pasan barajas según su nivel; cuando uno cree tener figura, grita por
+    // el MISMO camino que una persona y el servidor lo juzga igual.
+    bots.alCantarBaraja(sala, salaInfo, carta,
+        (cartaId) => barajasDeCartaSistema(salaInfo.modoJuego, cartaId),
+        (bot, nivel) => {
+            const reloj = setTimeout(() => {
+                if (!salaInfo.jugadores[bot.id]) return;
+                procesarLoteria(sala, bot.id, bot.nickname, bots.tableroDe(bot));
+            }, bots.entre(nivel.grito));
+            bot.relojes.push(reloj);
+        });
   }, velocidad); 
+}
+
+/**
+ * Reparte el bote y cierra la ronda.
+ *
+ * Antes esto vivía dentro de `veredicto-host`, que corría cada vez que el
+ * anfitrión juzgaba a alguien y pagaba al juzgar al último. Ahora que valida
+ * el servidor no hay a quién esperar: se llama una sola vez, cuando se cierra
+ * la ventana de empates.
+ */
+async function cerrarRonda(sala) {
+    const salaInfo = salas[sala];
+    if (!salaInfo) return;
+
+    const ganadoresReales = salaInfo.reclamantes.filter(r => r.status === 'validado');
+    if (ganadoresReales.length > 0) {
+    const boteTotal = salaInfo.bote;
+    const premioPorCabeza = Math.floor(boteTotal / ganadoresReales.length);
+
+    // Lista de IDs ganadores para fácil acceso
+    const idsGanadores = ganadoresReales.map(g => g.id);
+
+    // RECORREMOS TODOS LOS JUGADORES PARA ACTUALIZAR RACHAS
+    for (const playerId in salaInfo.jugadores) {
+        const jugador = salaInfo.jugadores[playerId];
+
+        if (idsGanadores.includes(playerId)) {
+            // ES GANADOR: Aumenta racha y da premio
+            jugador.racha = (jugador.racha || 0) + 1;
+            jugador.monedas += premioPorCabeza;
+
+            // Un bot no tiene cuenta: su premio vuelve a la banca y no se
+            // escribe nada. Sin esta rama, `actualizarSaldoUsuario` cae en su
+            // camino sin email y crearía un documento en `jugadores` por cada
+            // bot que ganase — basura permanente en Firestore.
+            if (jugador.esBot) {
+                registrarEmisionBanca(-premioPorCabeza, `premio recuperado de ${jugador.nickname}`);
+            } else {
+                await actualizarSaldoUsuario(jugador);
+                // Solo registramos movimiento si tiene email
+                if(jugador.email) await registrarMovimiento(jugador.email, 'victoria', premioPorCabeza, `Premio Lotería!`, true);
+            }
+        } else {
+            // PERDEDOR: Se le apaga la flama
+            jugador.racha = 0;
+        }
+
+        // Resetear apuesta
+        jugador.apostado = false;
+    }
+
+    // --- POZO ACUMULADO ---
+    // Se paga aparte del bote y vacía el acumulado. Solo si el anfitrión
+    // lo marcó y esa persona aportó en esta ronda.
+    let pozoPagado = 0;
+    let quienGanoElPozo = null;
+    if (salaInfo.ganadorPozo && idsGanadores.includes(salaInfo.ganadorPozo)) {
+        const jug = salaInfo.jugadores[salaInfo.ganadorPozo];
+        const monto = salaInfo.pozoAcumulado || 0;
+        if (jug && jug.pozoActivo && monto > 0) {
+            jug.monedas += monto;
+            await actualizarSaldoUsuario(jug);
+            if (jug.email) await registrarMovimiento(jug.email, 'premio', monto, '🎰 ¡Se llevó el POZO!', true);
+            await moverPozo(salaInfo, -monto);
+            pozoPagado = monto;
+            quienGanoElPozo = jug.nickname;
+        }
+    }
+
+    // La ronda terminó: se limpian las aportaciones y los apuntados.
+    salaInfo.pozoRonda = {};
+    salaInfo.ganadorPozo = null;
+    for (const id in salaInfo.jugadores) salaInfo.jugadores[id].pozoActivo = false;
+
+    salaInfo.bote = 0;
+    salaInfo.pagoRealizado = true;
+    salaInfo.reclamantes = [];
+    salaInfo.validandoEmpate = false;
+
+    io.to(sala).emit('ganadores-multiples', {
+        ganadores: ganadoresReales.map(g => g.nickname),
+        premio: premioPorCabeza,
+        prueba: salaInfo.pruebaVictoria || null,
+        pozoGanado: pozoPagado,
+        ganadorPozo: quienGanoElPozo
+    });
+    salaInfo.pruebaVictoria = null;
+    io.to(sala).emit('pozo-actualizado', salaInfo.pozoAcumulado || 0);
+    io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores); // Aquí se envían las nuevas rachas
+    io.to(sala).emit('bote-actualizado', 0);
+} 
+    else {
+        salaInfo.validandoEmpate = false;
+        salaInfo.reclamantes = [];
+        salaInfo.juegoIniciado = true;
+        io.to(sala).emit('falsa-alarma-masiva');
+        repartirCartas(sala);
+    }
+}
+
+/**
+ * Procesa un grito de lotería, venga de una persona o de un bot.
+ *
+ * Está fuera del closure de la conexión a propósito: un bot no tiene socket, y
+ * si esto viviera dentro habría que duplicar la lógica que decide quién gana —
+ * que es justo la que no puede tener dos versiones.
+ *
+ * `avisar` es cómo se le dice a quien gritó que no tiene nada. Para una persona
+ * es un `socket.emit`; para un bot no es nada, porque el bot ya lo sabía y solo
+ * grita cuando cree tener figura.
+ */
+function procesarLoteria(sala, jugadorId, nickname, boardState, avisar = () => {}) {
+    const salaInfo = salas[sala];
+    if (!salaInfo) return;
+    const jugador = salaInfo.jugadores[jugadorId];
+    if (!jugador) return;
+    if (!salaInfo.juegoIniciado && !salaInfo.validandoEmpate) return;
+
+    // Las barajas de cada carta las pone el SERVIDOR, nunca el cliente. Si se
+    // aceptaran las que manda el navegador, bastaría con editar el evento y
+    // mandar las barajas que acaban de cantarse.
+    //
+    // Salen de dos sitios según de quién sea la carta. Las del sistema están en
+    // `cartas-sistema.json`, iguales para todos; las compradas se guardaron al
+    // seleccionarlas, leídas de Firestore.
+    const cartas = {};
+    (boardState?.cards || []).forEach(id => {
+        const guardadas = jugador.barajasPropias?.[id]
+                       || barajasDeCartaSistema(salaInfo.modoJuego, id);
+        if (guardadas) cartas[id] = guardadas;
+    });
+
+    // AQUÍ decide el servidor, y ya no el anfitrión mirando. Compara las
+    // barajas de las cartas con su propio historial de lo cantado.
+    const veredicto = evaluarReclamo({
+        cartas,
+        marcadas: boardState?.marcadas || {},
+        historial: salaInfo.historial || [],
+        modo: salaInfo.modoJuego
+    });
+
+    // Un grito en falso ya no para la partida: se le contesta a quien lo dio y
+    // el juego sigue cantando. Antes bastaba con picar el botón de broma para
+    // congelar a toda la sala hasta que el anfitrión resolviera.
+    if (!veredicto.gano) {
+        avisar(veredicto.motivo);
+        return;
+    }
+
+    const reclamante = { id: jugadorId, nickname, boardState, status: 'validado', veredicto };
+
+    // El pozo acumulado se lleva por llenar las cuatro del centro, y solo si esa
+    // persona aportó en esta ronda: quien no se apuntó queda fuera aunque haya
+    // ganado la lotería.
+    if (veredicto.ganoCentro && jugador.pozoActivo) salaInfo.ganadorPozo = jugadorId;
+
+    if (!salaInfo.validandoEmpate) {
+        salaInfo.juegoIniciado = false;
+        salaInfo.validandoEmpate = true;
+        if (salaInfo.intervaloCartas) clearInterval(salaInfo.intervaloCartas);
+        salaInfo.reclamantes.push(reclamante);
+
+        // La prueba que ve la sala: la carta ganadora con sus fichas, la figura
+        // que se completó y la baraja con la que se cerró.
+        salaInfo.pruebaVictoria = {
+            tabla: veredicto.carta,
+            fichas: boardState?.chips?.[veredicto.carta] || [],
+            skin: boardState?.skin || null,
+            nickname,
+            barajas: cartas[veredicto.carta] || null,
+            figura: veredicto.tipo,
+            casillas: veredicto.casillas,
+            // Con cuál cerró: la de la figura que salió más tarde. Es la que la
+            // gente recuerda —«gané con el gallo»— y hasta ahora no se sabía.
+            barajaFinal: veredicto.barajaFinal
+        };
+
+        // La pausa se mantiene aunque ya no haya nada que juzgar: es para
+        // recoger a quien complete su figura con la MISMA baraja. Sin ella, el
+        // primero en reaccionar se llevaría el bote entero por unos milisegundos.
+        io.to(sala).emit('pausa-empate', { primerGanador: nickname, tiempo: 4 });
+        salaInfo.timerEmpate = setTimeout(() => cerrarRonda(sala), 4000);
+    } else if (!salaInfo.reclamantes.find(r => r.id === jugadorId)) {
+        salaInfo.reclamantes.push(reclamante);
+        io.to(sala).emit('notificar-otro-ganador', nickname);
+    }
 }
 
 async function actualizarSaldoUsuario(jugador) {
@@ -1849,6 +2049,18 @@ io.on('connection', (socket) => {
         
         if(salas[sala].timerEmpate) clearTimeout(salas[sala].timerEmpate);
         
+        // Los bots ponen su apuesta justo aquí, cuando ya nadie va a cambiar
+        // de carta. El dinero sale de la BANCA: un bot no tiene cuenta, así que
+        // esto no se escribe en Firestore, solo engorda el bote.
+        const puestoPorBots = bots.apostarBots(
+            salas[sala],
+            cartasDelModo(salas[sala].modoJuego).map(c => c.id)
+        );
+        if (puestoPorBots > 0) {
+            registrarEmisionBanca(puestoPorBots, 'apuesta de bots');
+            io.to(sala).emit('bote-actualizado', salas[sala].bote);
+        }
+
         // 2. Avisar que arranca
         io.to(sala).emit('juego-iniciado');
         
@@ -1933,177 +2145,50 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('loteria', ({ nickname, sala, boardState }) => {
-    const salaInfo = salas[sala];
-    if (!salaInfo) return;
-    const jugador = salaInfo.jugadores[socket.id];
-    if (!jugador) return;
-    if (!salaInfo.juegoIniciado && !salaInfo.validandoEmpate) return;
+  /**
+   * El anfitrión suma un bot a su sala.
+   *
+   * Solo el anfitrión, y solo antes de empezar: un bot que entra a media
+   * partida no ha visto las barajas anteriores y jugaría con una carta que ya
+   * nace perdida.
+   */
+  socket.on('agregar-bot', ({ sala, nivel }) => {
+      const salaInfo = salas[sala];
+      if (!salaInfo || socket.id !== salaInfo.hostId) return;
 
-    // Las barajas de cada carta las pone el SERVIDOR, nunca el cliente. Si se
-    // aceptaran las que manda el navegador, bastaría con editar el evento y
-    // mandar las barajas que acaban de cantarse.
-    //
-    // Salen de dos sitios según de quién sea la carta. Las del sistema están en
-    // `cartas-sistema.json`, iguales para todos; las compradas se guardaron al
-    // seleccionarlas, leídas de Firestore.
-    const cartas = {};
-    (boardState?.cards || []).forEach(id => {
-        const guardadas = jugador.barajasPropias?.[id]
-                       || barajasDeCartaSistema(salaInfo.modoJuego, id);
-        if (guardadas) cartas[id] = guardadas;
-    });
-
-    // AQUÍ decide el servidor, y ya no el anfitrión mirando. Compara las
-    // barajas de las cartas con su propio historial de lo cantado.
-    const veredicto = evaluarReclamo({
-        cartas,
-        marcadas: boardState?.marcadas || {},
-        historial: salaInfo.historial || [],
-        modo: salaInfo.modoJuego
-    });
-
-    // Un grito en falso ya no para la partida: se le contesta a quien lo dio y
-    // el juego sigue cantando. Antes bastaba con picar el botón de broma para
-    // congelar a toda la sala hasta que el anfitrión resolviera.
-    if (!veredicto.gano) {
-        socket.emit('loteria-rechazada', { motivo: veredicto.motivo });
-        return;
-    }
-
-    const reclamante = {
-        id: socket.id,
-        nickname,
-        boardState,
-        status: 'validado',
-        veredicto
-    };
-
-    // La prueba que ve la sala: la carta ganadora con sus fichas y la figura que
-    // se completó. Las barajas las pone el servidor, no el navegador.
-    const guardarPrueba = () => {
-        salaInfo.pruebaVictoria = {
-            tabla: veredicto.carta,
-            fichas: boardState?.chips?.[veredicto.carta] || [],
-            skin: boardState?.skin || null,
-            nickname,
-            barajas: cartas[veredicto.carta] || null,
-            figura: veredicto.tipo,
-            casillas: veredicto.casillas
-        };
-    };
-
-    // El pozo acumulado se lleva por llenar las cuatro del centro, y solo si esa
-    // persona aportó en esta ronda: quien no se apuntó queda fuera aunque haya
-    // ganado la lotería.
-    if (veredicto.ganoCentro && jugador.pozoActivo) salaInfo.ganadorPozo = socket.id;
-
-    if (!salaInfo.validandoEmpate) {
-        salaInfo.juegoIniciado = false;
-        salaInfo.validandoEmpate = true;
-        if (salaInfo.intervaloCartas) clearInterval(salaInfo.intervaloCartas);
-        salaInfo.reclamantes.push(reclamante);
-        guardarPrueba();
-
-        // La pausa se mantiene aunque ya no haya nada que juzgar: es para
-        // recoger a quien complete su figura con la MISMA baraja. Sin ella, el
-        // primero en reaccionar se llevaría el bote entero por unos milisegundos.
-        io.to(sala).emit('pausa-empate', { primerGanador: nickname, tiempo: 4 });
-        salaInfo.timerEmpate = setTimeout(() => cerrarRonda(sala), 4000);
-    } else if (!salaInfo.reclamantes.find(r => r.id === socket.id)) {
-        salaInfo.reclamantes.push(reclamante);
-        io.to(sala).emit('notificar-otro-ganador', nickname);
-    }
+      const r = bots.agregarBot(salaInfo, nivel || 'normal');
+      if (!r.ok) {
+          socket.emit('bot-rechazado', { motivo: r.motivo });
+          return;
+      }
+      io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores);
   });
 
-  /**
-   * Reparte el bote y cierra la ronda.
-   *
-   * Antes esto vivía dentro de `veredicto-host`, que corría cada vez que el
-   * anfitrión juzgaba a alguien y pagaba al juzgar al último. Ahora que valida
-   * el servidor no hay a quién esperar: se llama una sola vez, cuando se cierra
-   * la ventana de empates.
-   */
-  async function cerrarRonda(sala) {
+  socket.on('quitar-bot', ({ sala, id }) => {
       const salaInfo = salas[sala];
-      if (!salaInfo) return;
+      if (!salaInfo || socket.id !== salaInfo.hostId) return;
+      if (salaInfo.juegoIniciado) return;
 
-      const ganadoresReales = salaInfo.reclamantes.filter(r => r.status === 'validado');
-      if (ganadoresReales.length > 0) {
-      const boteTotal = salaInfo.bote;
-      const premioPorCabeza = Math.floor(boteTotal / ganadoresReales.length);
-
-      // Lista de IDs ganadores para fácil acceso
-      const idsGanadores = ganadoresReales.map(g => g.id);
-
-      // RECORREMOS TODOS LOS JUGADORES PARA ACTUALIZAR RACHAS
-      for (const playerId in salaInfo.jugadores) {
-          const jugador = salaInfo.jugadores[playerId];
-
-          if (idsGanadores.includes(playerId)) {
-              // ES GANADOR: Aumenta racha y da premio
-              jugador.racha = (jugador.racha || 0) + 1;
-              jugador.monedas += premioPorCabeza;
-              await actualizarSaldoUsuario(jugador);
-              // Solo registramos movimiento si tiene email
-              if(jugador.email) await registrarMovimiento(jugador.email, 'victoria', premioPorCabeza, `Premio Lotería!`, true);
-          } else {
-              // PERDEDOR: Se le apaga la flama
-              jugador.racha = 0;
-          }
-
-          // Resetear apuesta
-          jugador.apostado = false;
+      // Lo que tenía apostado se devuelve al bote, o mejor dicho se le quita:
+      // era dinero de la banca y no puede quedarse en un bote que ya no le
+      // corresponde.
+      const bot = salaInfo.jugadores[id];
+      if (bot && bot.esBot && bot.apostado) {
+          salaInfo.bote = Math.max(0, salaInfo.bote - (bot.cantidadApostada || 0));
+          registrarEmisionBanca(-(bot.cantidadApostada || 0), 'bot retirado antes de jugar');
+          io.to(sala).emit('bote-actualizado', salaInfo.bote);
       }
 
-      // --- POZO ACUMULADO ---
-      // Se paga aparte del bote y vacía el acumulado. Solo si el anfitrión
-      // lo marcó y esa persona aportó en esta ronda.
-      let pozoPagado = 0;
-      let quienGanoElPozo = null;
-      if (salaInfo.ganadorPozo && idsGanadores.includes(salaInfo.ganadorPozo)) {
-          const jug = salaInfo.jugadores[salaInfo.ganadorPozo];
-          const monto = salaInfo.pozoAcumulado || 0;
-          if (jug && jug.pozoActivo && monto > 0) {
-              jug.monedas += monto;
-              await actualizarSaldoUsuario(jug);
-              if (jug.email) await registrarMovimiento(jug.email, 'premio', monto, '🎰 ¡Se llevó el POZO!', true);
-              await moverPozo(salaInfo, -monto);
-              pozoPagado = monto;
-              quienGanoElPozo = jug.nickname;
-          }
+      if (bots.quitarBot(salaInfo, id)) {
+          io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores);
+          io.to(sala).emit('cartas-desactivadas', cartasQueSeApartan(salaInfo));
       }
+  });
 
-      // La ronda terminó: se limpian las aportaciones y los apuntados.
-      salaInfo.pozoRonda = {};
-      salaInfo.ganadorPozo = null;
-      for (const id in salaInfo.jugadores) salaInfo.jugadores[id].pozoActivo = false;
-
-      salaInfo.bote = 0;
-      salaInfo.pagoRealizado = true;
-      salaInfo.reclamantes = [];
-      salaInfo.validandoEmpate = false;
-
-      io.to(sala).emit('ganadores-multiples', {
-          ganadores: ganadoresReales.map(g => g.nickname),
-          premio: premioPorCabeza,
-          prueba: salaInfo.pruebaVictoria || null,
-          pozoGanado: pozoPagado,
-          ganadorPozo: quienGanoElPozo
-      });
-      salaInfo.pruebaVictoria = null;
-      io.to(sala).emit('pozo-actualizado', salaInfo.pozoAcumulado || 0);
-      io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores); // Aquí se envían las nuevas rachas
-      io.to(sala).emit('bote-actualizado', 0);
-  } 
-      else {
-          salaInfo.validandoEmpate = false;
-          salaInfo.reclamantes = [];
-          salaInfo.juegoIniciado = true;
-          io.to(sala).emit('falsa-alarma-masiva');
-          repartirCartas(sala);
-      }
-  }
+  socket.on('loteria', ({ nickname, sala, boardState }) => {
+    procesarLoteria(sala, socket.id, nickname, boardState,
+        (motivo) => socket.emit('loteria-rechazada', { motivo }));
+  });
 
   socket.on('salir-sala', async (sala) => {
     if (salas[sala] && salas[sala].jugadores[socket.id]) {
@@ -2111,15 +2196,27 @@ io.on('connection', (socket) => {
         const eraHost = (salas[sala].hostId === socket.id);
         socket.leave(sala);
         delete salas[sala].jugadores[socket.id];
-        if (Object.keys(salas[sala].jugadores).length === 0) {
+        // Una sala donde solo quedan bots está vacía: no hay nadie a quien
+        // enseñarle la partida. Se cierra igual que si no quedara nadie.
+        const humanos = Object.values(salas[sala].jugadores).filter(j => !j.esBot);
+        if (humanos.length === 0) {
             if (salas[sala].intervaloCartas) clearInterval(salas[sala].intervaloCartas);
+            // Los relojes de los bots sobreviven a la sala si no se paran: al
+            // dispararse buscarían un objeto que ya no existe.
+            bots.pararBots(salas[sala]);
             delete salas[sala];
         } else {
             if (eraHost) {
-                const nuevoHostId = Object.keys(salas[sala].jugadores)[0];
-                salas[sala].hostId = nuevoHostId;
-                salas[sala].jugadores[nuevoHostId].host = true;
-                io.to(nuevoHostId).emit('rol-asignado', { host: true });
+                // El anfitrión nuevo tiene que ser una persona: un bot no puede
+                // iniciar la partida ni añadir a nadie, y la sala se quedaría
+                // congelada esperando a que hiciera algo.
+                const nuevoHostId = Object.values(salas[sala].jugadores)
+                    .filter(j => !j.esBot)[0]?.id;
+                if (nuevoHostId) {
+                    salas[sala].hostId = nuevoHostId;
+                    salas[sala].jugadores[nuevoHostId].host = true;
+                    io.to(nuevoHostId).emit('rol-asignado', { host: true });
+                }
             }
             const cartasOcupadas = Object.values(salas[sala].jugadores).flatMap(j => j.cartas);
             io.to(sala).emit('cartas-desactivadas', cartasOcupadas);
@@ -2956,12 +3053,20 @@ io.on('connection', (socket) => {
               }
               const eraHost = (salas[salaId].hostId === socket.id);
               delete salas[salaId].jugadores[socket.id];
-              if(Object.keys(salas[salaId].jugadores).length === 0) {
+
+              // Una sala donde solo quedan bots está vacía. Si se contaran, la
+              // sala viviría para siempre con sus relojes en marcha y sin nadie
+              // mirando.
+              const quedanHumanos = Object.values(salas[salaId].jugadores).filter(j => !j.esBot);
+              if(quedanHumanos.length === 0) {
                   if(salas[salaId].intervaloCartas) clearInterval(salas[salaId].intervaloCartas);
+                  bots.pararBots(salas[salaId]);
                   delete salas[salaId];
               } else {
                   if(eraHost) {
-                      const nuevoHost = Object.keys(salas[salaId].jugadores)[0];
+                      // El anfitrión nuevo tiene que ser una persona: un bot no
+                      // puede iniciar la partida ni añadir a nadie.
+                      const nuevoHost = quedanHumanos[0].id;
                       salas[salaId].hostId = nuevoHost;
                       io.to(nuevoHost).emit('rol-asignado', { host: true });
                   }

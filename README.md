@@ -179,6 +179,46 @@ servidor. Las fichas las manda el navegador y podrían falsearse, pero mentir ah
 solo saltaría el requisito de haber estado atento — nunca daría por buena una
 carta cuyas barajas no hayan salido.
 
+### Bots — `bots.js`
+
+Un bot es un jugador más de la sala: elige cartas, apuesta, va tapando las
+barajas que le cantan y grita lotería. La diferencia es que no tiene socket y
+que su dinero es de la banca.
+
+Existe porque el problema real del juego no es el juego, **es juntar gente**. Y
+solo se pudo escribir cuando el servidor aprendió a validar solo: un bot no
+puede «mirar» su carta, necesita que alguien sepa en datos si la figura está
+completa.
+
+| Nivel | Se da cuenta | Tarda en tapar | Tarda en gritar |
+|---|---|---|---|
+| `distraido` | 55% | 1.4–3.6 s | 1.2–2.6 s |
+| `normal` | 85% | 0.7–2.0 s | 0.6–1.5 s |
+| `experto` | 97% | 0.3–0.9 s | 0.25–0.7 s |
+
+El nivel `distraido` **no es un bot roto**: una sala donde todos juegan perfecto
+no es divertida, es una sala donde no ganas nunca. Que se les pasen barajas es lo
+que deja hueco a la gente.
+
+⚠️ **Un bot no se salta la validación.** Grita por el mismo camino que todo el
+mundo (`procesarLoteria`) y el servidor lo juzga igual. No tiene su propia
+comprobación a propósito: si la tuviera, podría ganar con reglas distintas.
+
+⚠️ **El dinero del bot es de la BANCA.** Un bot no tiene email, así que nada suyo
+se escribe en Firestore — es lo que lo mantiene separado del dinero de verdad. Su
+apuesta engorda el bote y se apunta con `registrarEmisionBanca`; si gana, ese
+premio vuelve a la banca y se apunta en negativo.
+
+**Esto significa que la banca emite monedas.** Si gana una persona, se lleva
+también lo que pusieron los bots, y esas monedas son nuevas. Es a propósito —es
+lo que hace que jugar con bots valga la pena— pero es dinero real saliendo.
+Vigílalo en `finanzas/general.monedasEmitidasBanca`; si crece más rápido de lo
+que quieres, sube el nivel de los bots o baja cuántos caben por sala.
+
+Una sala donde **solo quedan bots se cierra**: no hay a quién enseñarle la
+partida, y dejarla viva sería una sala eterna gastando relojes. Y el anfitrión
+nuevo siempre es una persona, porque un bot no puede iniciar la partida.
+
 ---
 
 ## 🧪 Pruebas
@@ -195,6 +235,7 @@ aleatorio se comprueba midiendo la distribución sobre muchas repeticiones.
 | `generador.prueba.js` | Los tres modos de carta, el barajado sin sesgo, las cartas a medida |
 | `pack.prueba.js` | Que un pack no repita cartas ni te venda una que ya tienes |
 | `victoria.prueba.js` | Las 20 figuras, las condiciones por modo, y que un grito en falso no gane |
+| `bots.prueba.js` | Que un bot no robe cartas ajenas, de dónde sale su dinero, que sus relojes se paren, y que el nivel se note (se mide sobre 60 partidas) |
 
 ⚠️ Una prueba que nunca falla no prueba nada. Al añadir una, rómpela a propósito
 y comprueba que salta.
@@ -323,6 +364,8 @@ camino viejo: pon `AUTH_ESTRICTA=true` en Render y queda cerrado.
 - [x] Modo **Doble**: una baraja ocupa las dos casillas del centro
 - [ ] Estado de salas en Redis
 - [ ] Partir `server.js` en módulos por juego
-- [ ] Bot que juegue solo — el servidor ya sabe marcar y validar
+- [x] **Bots** con tres niveles, que se añaden a la sala desde el anfitrión
+- [ ] Salas de bots permanentes, abiertas para unirse — hay que resolver antes
+      que Render duerme a los 15 min y que el estado vive en RAM
 - [x] Webhook de Stripe en lugar de confiar solo en el redirect de retorno
 - [ ] Evaluar migración a VPS propio

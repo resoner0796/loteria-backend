@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node pruebas/generador.prueba.js && node pruebas/pack.prueba.js && node pruebas/victoria.prueba.js"
+    "test": "node pruebas/generador.prueba.js && node pruebas/pack.prueba.js && node pruebas/victoria.prueba.js && node pruebas/bots.prueba.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

@@ -207,6 +207,43 @@ seccion('El historial llega con ceros y la carta con números');
     ok('compara bien "01" con 1', r.gano, `motivo: ${r.motivo}`);
 }
 
+seccion('Se sabe con qué baraja se cerró');
+
+{
+    // La fila de arriba lleva las barajas 1..4. Se cantan desordenadas y la
+    // última en salir es la 3.
+    const r = v.evaluarReclamo({
+        cartas: { '01': CARTA },
+        marcadas: { '01': [0, 1, 2, 3] },
+        historial: ['02', '04', '01', '03'],
+        modo: 'tradicional'
+    });
+    ok('gana con la fila de arriba', r.gano);
+    ok('y dice que cerró con la última cantada', r.barajaFinal === 3,
+        `dijo: ${r.barajaFinal}`);
+
+    // Cambiando el orden del historial, cambia la que cerró.
+    const otra = v.evaluarReclamo({
+        cartas: { '01': CARTA },
+        marcadas: { '01': [0, 1, 2, 3] },
+        historial: ['03', '02', '04', '01'],
+        modo: 'tradicional'
+    });
+    ok('con otro orden, la que cierra es otra', otra.barajaFinal === 1,
+        `dijo: ${otra.barajaFinal}`);
+
+    // Barajas de la figura cantadas ANTES que otras que no son de la figura:
+    // la que cierra sigue siendo de la figura, no la última cantada a secas.
+    const conRuido = v.evaluarReclamo({
+        cartas: { '01': CARTA },
+        marcadas: { '01': [0, 1, 2, 3] },
+        historial: ['01', '02', '03', '04', '50', '51'],
+        modo: 'tradicional'
+    });
+    ok('no señala una baraja que no está en la figura', conRuido.barajaFinal === 4,
+        `dijo: ${conRuido.barajaFinal}`);
+}
+
 seccion('El Pozo del centro se detecta aparte de ganar');
 
 {
