@@ -61,6 +61,9 @@ function construirFiguras() {
 
 const FIGURAS = construirFiguras();
 
+/** Lo que se le dice a quien tenía la figura pero gritó tarde. */
+const SE_TE_PASO = '¡Se te pasó! Había que gritar con esa baraja.';
+
 /** Las cuatro del centro, que es lo que se lleva el Pozo acumulado. */
 const CENTRO = [5, 6, 9, 10];
 
@@ -108,14 +111,30 @@ const estaCantada = (baraja, cantadas) =>
  *
  * Devuelve `{ gano, tipo, casillas, motivo }`.
  */
-function evaluarCarta(barajas, cantadas, marcadas, condicion = 'figura') {
+function evaluarCarta(barajas, cantadas, marcadas, condicion = 'figura', ultima = null) {
     if (!Array.isArray(barajas) || barajas.length !== CASILLAS) {
         return { gano: false, motivo: 'La carta no tiene la forma que debe' };
     }
 
     const conFicha = new Set((marcadas || []).map(Number));
+
+    /**
+     * ¿Se cerró con la baraja que acaban de cantar?
+     *
+     * En la mesa de verdad, si se te pasa el momento de gritar ya no vale: el
+     * que canta sigue y la ocasión se fue. Sin esta regla bastaba con darse
+     * cuenta tarde —o esperar a ver si caía algo mejor, como el pozo— y gritar
+     * cuando conviniera, con una figura que llevaba tres barajas completa.
+     *
+     * `ultima` a null desactiva la regla, que es lo que hacen las pruebas de las
+     * figuras en sí.
+     */
+    const aTiempo = (casillas) =>
+        ultima === null || casillas.some(i => Number(barajas[i]) === Number(ultima));
+
     const cumple = (casillas) =>
-        casillas.every(i => estaCantada(barajas[i], cantadas) && conFicha.has(i));
+        casillas.every(i => estaCantada(barajas[i], cantadas) && conFicha.has(i))
+        && aTiempo(casillas);
 
     if (condicion === 'completa') {
         // Solo cuentan las casillas que llevan baraja: en el Pozo son ocho de
@@ -129,6 +148,11 @@ function evaluarCarta(barajas, cantadas, marcadas, condicion = 'figura') {
         }
         const faltan = ocupadas.filter(i => !estaCantada(barajas[i], cantadas)).length;
         const sinFicha = ocupadas.filter(i => estaCantada(barajas[i], cantadas) && !conFicha.has(i)).length;
+
+        // Tenía la carta llena pero no gritó a tiempo: se le pasó.
+        if (faltan === 0 && sinFicha === 0) {
+            return { gano: false, motivo: SE_TE_PASO };
+        }
         return {
             gano: false,
             motivo: faltan > 0
@@ -150,11 +174,17 @@ function evaluarCarta(barajas, cantadas, marcadas, condicion = 'figura') {
     // muy distinto de «no tenías nada», y es la diferencia entre un despiste y
     // alguien picando el botón por picarlo.
     let masCerca = 5;
+    let laTeniaTarde = false;
     for (const figura of FIGURAS) {
         if (figura.casillas.some(i => barajas[i] === null || barajas[i] === undefined)) continue;
         const puestas = figura.casillas.filter(i => estaCantada(barajas[i], cantadas) && conFicha.has(i)).length;
+        if (puestas === figura.casillas.length) laTeniaTarde = true;
         masCerca = Math.min(masCerca, figura.casillas.length - puestas);
     }
+
+    // La figura estaba completa: lo que falló fue el momento, no la carta.
+    if (laTeniaTarde) return { gano: false, motivo: SE_TE_PASO };
+
     return {
         gano: false,
         motivo: masCerca === 1
@@ -169,8 +199,16 @@ function evaluarCarta(barajas, cantadas, marcadas, condicion = 'figura') {
  * `cartas` es `{ id: [16 barajas] }` — las que el servidor tiene guardadas, no
  * las que mande el navegador.
  */
-function evaluarReclamo({ cartas, marcadas, historial, modo }) {
+function evaluarReclamo({ cartas, marcadas, historial, modo, exigirUltima = true }) {
     const condicion = CONDICION_POR_MODO[modo] || 'figura';
+
+    // La figura tiene que incluir la ÚLTIMA baraja cantada: si se te pasó el
+    // momento, ya no cuenta. Sin esto, alguien que se diera cuenta tarde podía
+    // esperar a que cayera algo mejor —el pozo, por ejemplo— y gritar cuando le
+    // conviniera con una figura que llevaba tres barajas cerrada.
+    const ultima = (exigirUltima && historial && historial.length > 0)
+        ? Number(historial[historial.length - 1])
+        : null;
 
     // El historial viaja con ceros; aquí se compara como número una sola vez,
     // en lugar de normalizar dentro de los bucles.
@@ -190,7 +228,7 @@ function evaluarReclamo({ cartas, marcadas, historial, modo }) {
     let mejorMotivo = 'No completaste ninguna figura';
 
     for (const [id, barajas] of Object.entries(cartas || {})) {
-        const r = evaluarCarta(barajas, cantadas, (marcadas || {})[id], condicion);
+        const r = evaluarCarta(barajas, cantadas, (marcadas || {})[id], condicion, ultima);
         if (r.gano) {
             // Con cuál se cerró: de las barajas de la figura, la que salió más
             // tarde. Es la que la gente recuerda —«gané con el gallo»— y hasta
@@ -227,6 +265,6 @@ const NOMBRE_FIGURA = {
 };
 
 module.exports = {
-    FIGURAS, CENTRO, CONDICION_POR_MODO, NOMBRE_FIGURA,
+    FIGURAS, CENTRO, CONDICION_POR_MODO, NOMBRE_FIGURA, SE_TE_PASO,
     evaluarCarta, evaluarReclamo
 };

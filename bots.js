@@ -33,11 +33,22 @@ const crypto = require('crypto');
  * El nivel `distraido` existe a propósito y no es un bot roto: una sala donde
  * todos los bots juegan perfecto no es divertida, es una sala donde no ganas
  * nunca. Que se les pasen barajas es lo que deja hueco a la gente.
+ *
+ * ⚠️ `reflejos` y `grito` SE SUMAN, y desde que hay que gritar con la baraja que
+ * cierra, esa suma tiene que caber entre dos cantes. A 3 segundos por baraja:
+ *
+ *   distraido  1.4 – 3.6 s   se le pasa a menudo
+ *   normal     0.85 – 2.3 s  casi siempre llega
+ *   experto    0.45 – 1.25 s siempre llega
+ *
+ * Con la velocidad más rápida de la sala los tres se ven apretados, y eso está
+ * bien: a una persona también le cuesta. Pero si algún día se baja de 2 segundos
+ * por baraja, hay que revisar estos números o los bots dejarán de ganar nunca.
  */
 const NIVELES = {
-    distraido: { atencion: 0.55, reflejos: [1400, 3600], grito: [1200, 2600] },
-    normal:    { atencion: 0.85, reflejos: [700, 2000],  grito: [600, 1500] },
-    experto:   { atencion: 0.97, reflejos: [300, 900],   grito: [250, 700] }
+    distraido: { atencion: 0.55, reflejos: [900, 2200], grito: [500, 1400] },
+    normal:    { atencion: 0.85, reflejos: [500, 1400], grito: [350, 900] },
+    experto:   { atencion: 0.97, reflejos: [250, 700],  grito: [200, 550] }
 };
 
 /** Nombres de la lotería, para que se note quién es quién en la lista. */

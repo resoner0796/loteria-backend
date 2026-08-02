@@ -232,16 +232,87 @@ seccion('Se sabe con qué baraja se cerró');
     ok('con otro orden, la que cierra es otra', otra.barajaFinal === 1,
         `dijo: ${otra.barajaFinal}`);
 
-    // Barajas de la figura cantadas ANTES que otras que no son de la figura:
-    // la que cierra sigue siendo de la figura, no la última cantada a secas.
+    // Con la regla del tiempo desactivada, la que cierra sigue siendo de la
+    // figura y no la última cantada a secas.
     const conRuido = v.evaluarReclamo({
         cartas: { '01': CARTA },
         marcadas: { '01': [0, 1, 2, 3] },
         historial: ['01', '02', '03', '04', '50', '51'],
-        modo: 'tradicional'
+        modo: 'tradicional',
+        exigirUltima: false
     });
     ok('no señala una baraja que no está en la figura', conRuido.barajaFinal === 4,
         `dijo: ${conRuido.barajaFinal}`);
+}
+
+seccion('Se te pasó: hay que gritar CON la baraja que cierra');
+
+{
+    const base = { cartas: { '01': CARTA }, marcadas: { '01': [0, 1, 2, 3] }, modo: 'tradicional' };
+
+    // La fila de arriba son las barajas 1..4, y la 4 acaba de salir.
+    const aTiempo = v.evaluarReclamo({ ...base, historial: ['01', '02', '03', '04'] });
+    ok('gritar justo con la que cierra vale', aTiempo.gano);
+
+    // Cantaron una más: la ocasión se fue.
+    const tarde = v.evaluarReclamo({ ...base, historial: ['01', '02', '03', '04', '50'] });
+    ok('gritar una baraja después YA NO vale', !tarde.gano);
+    ok('y se le dice que se le pasó', tarde.motivo === v.SE_TE_PASO, tarde.motivo);
+
+    // Y mucho después, tampoco. Este es el caso que motivó la regla: esperar a
+    // ver si cae algo mejor —el pozo— y gritar cuando convenga.
+    const muchoDespues = v.evaluarReclamo({
+        ...base, historial: ['01', '02', '03', '04', '50', '51', '52', '53']
+    });
+    ok('ni cinco barajas después', !muchoDespues.gano);
+
+    // Que la última cantada esté en la carta no basta: tiene que estar en la
+    // FIGURA que se completó.
+    const enLaCartaPeroNoEnLaFigura = v.evaluarReclamo({
+        cartas: { '01': CARTA },
+        marcadas: { '01': [0, 1, 2, 3] },
+        historial: ['01', '02', '03', '04', '09'],   // la 9 está en la casilla 8
+        modo: 'tradicional'
+    });
+    ok('una baraja de la carta que no está en la figura tampoco vale',
+        !enLaCartaPeroNoEnLaFigura.gano);
+
+    // Con VARIAS figuras completas, vale si alguna incluye la última.
+    const dosFiguras = v.evaluarReclamo({
+        cartas: { '01': CARTA },
+        // Fila de arriba (1,2,3,4) y segunda fila (5,6,7,8).
+        marcadas: { '01': [0, 1, 2, 3, 4, 5, 6, 7] },
+        historial: ['01', '02', '03', '04', '05', '06', '07', '08'],
+        modo: 'tradicional'
+    });
+    ok('con dos figuras hechas, vale la que incluye la última', dosFiguras.gano);
+    ok('y la baraja de cierre es esa última', dosFiguras.barajaFinal === 8,
+        `dijo: ${dosFiguras.barajaFinal}`);
+
+    // En modo llena, igual.
+    const todas = Array.from({ length: 16 }, (_, i) => i);
+    const llenaTarde = v.evaluarReclamo({
+        cartas: { '01': CARTA },
+        marcadas: { '01': todas },
+        historial: [...Array.from({ length: 16 }, (_, i) => String(i + 1).padStart(2, '0')), '50'],
+        modo: 'llena'
+    });
+    ok('en carta llena, gritar tarde tampoco vale', !llenaTarde.gano);
+    ok('y también se le dice que se le pasó', llenaTarde.motivo === v.SE_TE_PASO, llenaTarde.motivo);
+
+    const llenaATiempo = v.evaluarReclamo({
+        cartas: { '01': CARTA },
+        marcadas: { '01': todas },
+        historial: Array.from({ length: 16 }, (_, i) => String(i + 1).padStart(2, '0')),
+        modo: 'llena'
+    });
+    ok('pero con la última sí', llenaATiempo.gano);
+
+    // La regla se puede apagar, que es lo que usan las pruebas de figuras.
+    const sinRegla = v.evaluarReclamo({
+        ...base, historial: ['01', '02', '03', '04', '50'], exigirUltima: false
+    });
+    ok('la regla se puede desactivar a propósito', sinRegla.gano);
 }
 
 seccion('El Pozo del centro se detecta aparte de ganar');

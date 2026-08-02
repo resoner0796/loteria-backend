@@ -2000,6 +2000,28 @@ io.on('connection', (socket) => {
         const costoPozo = quierePozo ? 1 : 0;
 
         // 3. Verificamos si le alcanza para EL TOTAL
+        //
+        // Si no alcanza hay que DECIRLO. Antes esta condición simplemente no se
+        // cumplía y el evento moría en silencio: el navegador ya había hecho
+        // volar las monedas, así que se veía la animación, el bote no subía y
+        // no aparecía ningún aviso. Parecía que el juego se había colgado.
+        if (jugador.apostado) {
+            socket.emit('apuesta-rechazada', { motivo: 'Ya apostaste esta ronda.' });
+            return;
+        }
+        if (jugador.monedas < costoTotal + costoPozo) {
+            const falta = (costoTotal + costoPozo) - jugador.monedas;
+            socket.emit('apuesta-rechazada', {
+                motivo: costoPozo
+                    ? `No te alcanza: ${numCartas} cartas cuestan $${costoTotal} y el pozo $${costoPozo}. Te faltan $${falta}.`
+                    : `No te alcanza: ${numCartas} cartas cuestan $${costoTotal}. Te faltan $${falta}.`
+            });
+            // Se reenvía la lista para que el saldo del navegador vuelva a la
+            // realidad: acaba de pintar monedas volando que no salieron.
+            socket.emit('jugadores-actualizados', salas[sala].jugadores);
+            return;
+        }
+
         if (jugador && !jugador.apostado && jugador.monedas >= costoTotal + costoPozo) {
             jugador.monedas -= (costoTotal + costoPozo);
             jugador.apostado = true;

@@ -190,11 +190,15 @@ solo se pudo escribir cuando el servidor aprendió a validar solo: un bot no
 puede «mirar» su carta, necesita que alguien sepa en datos si la figura está
 completa.
 
-| Nivel | Se da cuenta | Tarda en tapar | Tarda en gritar |
+| Nivel | Se da cuenta | Tapar + gritar | A 3 s por baraja |
 |---|---|---|---|
-| `distraido` | 55% | 1.4–3.6 s | 1.2–2.6 s |
-| `normal` | 85% | 0.7–2.0 s | 0.6–1.5 s |
-| `experto` | 97% | 0.3–0.9 s | 0.25–0.7 s |
+| `distraido` | 55% | 1.4–3.6 s | se le pasa a menudo |
+| `normal` | 85% | 0.85–2.3 s | casi siempre llega |
+| `experto` | 97% | 0.45–1.25 s | siempre llega |
+
+⚠️ Los dos retardos **se suman**, y desde que hay que gritar con la baraja que
+cierra, esa suma tiene que caber entre dos cantes. Si algún día se baja de 2
+segundos por baraja, hay que revisar estos números o los bots no ganarán nunca.
 
 El nivel `distraido` **no es un bot roto**: una sala donde todos juegan perfecto
 no es divertida, es una sala donde no ganas nunca. Que se les pasen barajas es lo
