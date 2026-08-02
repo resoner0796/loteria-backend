@@ -390,12 +390,13 @@ const CATALOGO_ITEMS = {
 const PACK_TABLAS = { precio: 20, cuantas: 4 };
 
 /**
- * Lo que cuesta una tabla hecha a mano.
+ * Lo que cuesta armar tablas a mano, y cuántas trae.
  *
- * Se paga más que las del pack porque eliges tú qué lleva: en el pack salen
- * cuatro por 20 (cinco cada una) y aquí eliges una sola.
+ * Se arman las DOS antes de pagar y se cobran juntas. Cobrar por tabla obligaría
+ * a llevar la cuenta de cuántas te quedan pagadas, y eso es estado que se puede
+ * quedar a medias: pagas una, cierras el navegador y nadie sabe qué pasó.
  */
-const TABLA_PERSONALIZADA = { precio: 25 };
+const TABLAS_PERSONALIZADAS = { precio: 25, cuantas: 2 };
 
 /**
  * Tope de tablas guardadas por persona.
@@ -2034,59 +2035,77 @@ io.on('connection', (socket) => {
       }
   });
 
-  socket.on('comprar-tabla-personalizada', async ({ cartas, modo }) => {
-      const email = emailDeSocket(socket, null, 'comprar-tabla-personalizada');
+  socket.on('comprar-tablas-personalizadas', async ({ tablas, modo }) => {
+      const email = emailDeSocket(socket, null, 'comprar-tablas-personalizadas');
       if (!email) return;
 
-      // El navegador ya avisa mientras se arma la tabla, pero eso es comodidad:
-      // este evento se puede mandar a mano desde la consola. Aquí se comprueba
-      // TODO otra vez, porque de esto depende que la tabla sea jugable.
-      const revision = generador.validarTablaManual(cartas, modo);
-      if (!revision.ok) return socket.emit('error-pack', revision.motivo);
+      if (!Array.isArray(tablas) || tablas.length !== TABLAS_PERSONALIZADAS.cuantas) {
+          return socket.emit('error-pack',
+              `Hay que armar las ${TABLAS_PERSONALIZADAS.cuantas} tablas`);
+      }
+
+      // El navegador ya avisa mientras se arman, pero eso es comodidad: este
+      // evento se puede mandar a mano desde la consola. Aquí se revisan TODAS
+      // otra vez, porque de esto depende que sean jugables.
+      const revisadas = [];
+      for (const cartas of tablas) {
+          const revision = generador.validarTablaManual(cartas, modo);
+          if (!revision.ok) return socket.emit('error-pack', revision.motivo);
+          revisadas.push(revision.cartas);
+      }
+
+      const firmas = revisadas.map(generador.firmaDeTabla);
+      if (new Set(firmas).size !== firmas.length) {
+          return socket.emit('error-pack', 'Las dos tablas tienen las mismas cartas');
+      }
 
       try {
           const yaTiene = await tablasDe(email);
-          if (yaTiene.length >= TOPE_TABLAS_POR_USUARIO) {
+          if (yaTiene.length + TABLAS_PERSONALIZADAS.cuantas > TOPE_TABLAS_POR_USUARIO) {
               return socket.emit('error-pack',
                   `Ya tienes ${yaTiene.length} tablas. El máximo son ${TOPE_TABLAS_POR_USUARIO}.`);
           }
-
-          const firma = generador.firmaDeTabla(revision.cartas);
-          if (yaTiene.some(t => t.firma === firma)) {
+          if (firmas.some(f => yaTiene.some(t => t.firma === f))) {
               return socket.emit('error-pack', 'Ya tienes una tabla con esas mismas cartas');
           }
 
+          // Un solo cobro por las dos: se arman antes de pagar, así no hay
+          // tablas pagadas a medias esperando a que alguien vuelva.
           const userRef = db.collection('usuarios').doc(email);
           await db.runTransaction(async (t) => {
               const doc = await t.get(userRef);
               if (!doc.exists) throw new Error('Usuario no existe');
-              if ((doc.data().monedas || 0) < TABLA_PERSONALIZADA.precio) throw new Error('SALDO');
+              if ((doc.data().monedas || 0) < TABLAS_PERSONALIZADAS.precio) throw new Error('SALDO');
               t.update(userRef, {
-                  monedas: admin.firestore.FieldValue.increment(-TABLA_PERSONALIZADA.precio)
+                  monedas: admin.firestore.FieldValue.increment(-TABLAS_PERSONALIZADAS.precio)
               });
           });
 
-          await userRef.collection('tablas').add({
-              cartas: revision.cartas,
-              modo,
-              firma,
-              personalizada: true,
-              creada: admin.firestore.FieldValue.serverTimestamp()
+          const lote = db.batch();
+          revisadas.forEach((cartas, i) => {
+              lote.set(userRef.collection('tablas').doc(), {
+                  cartas,
+                  modo,
+                  firma: firmas[i],
+                  personalizada: true,
+                  creada: admin.firestore.FieldValue.serverTimestamp()
+              });
           });
+          await lote.commit();
 
-          await registrarMovimiento(email, 'compra', TABLA_PERSONALIZADA.precio,
-              `Tabla personalizada (${modo})`, false);
+          await registrarMovimiento(email, 'compra', TABLAS_PERSONALIZADAS.precio,
+              `${TABLAS_PERSONALIZADAS.cuantas} tablas a la carta (${modo})`, false);
 
           socket.emit('usuario-actualizado', perfilPublico((await userRef.get()).data()));
           socket.emit('mis-tablas', await tablasDe(email));
-          socket.emit('tabla-personalizada-creada');
+          socket.emit('tablas-personalizadas-creadas', { cuantas: revisadas.length });
 
       } catch (e) {
           if (e.message === 'SALDO') {
-              return socket.emit('error-pack', `Necesitas $${TABLA_PERSONALIZADA.precio} monedas`);
+              return socket.emit('error-pack', `Necesitas $${TABLAS_PERSONALIZADAS.precio} monedas`);
           }
-          console.error('Error creando tabla personalizada:', e);
-          socket.emit('error-pack', 'No se pudo crear la tabla');
+          console.error('Error creando tablas personalizadas:', e);
+          socket.emit('error-pack', 'No se pudieron crear las tablas');
       }
   });
 
