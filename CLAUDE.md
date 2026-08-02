@@ -237,3 +237,34 @@ npm start          # → http://localhost:3000
 crea un proyecto de Firebase aparte y usa llaves `sk_test_` de Stripe.
 
 No hay tests. Verificación mínima tras un cambio: `node --check server.js`.
+
+## Tablas generadas
+
+Las tablas que se venden en packs. `generador.js` las crea y `comprar-pack-tablas`
+las cobra y guarda.
+
+**Una tabla es una lista de 16 números**, no una imagen. Las casillas vacías van
+a `null`, que solo pasa en el modo `esquinas`. Se guardan en
+`usuarios/{email}/tablas`:
+
+```js
+{ cartas: [12, 45, null, ...], modo: 'normal', firma: '3-12-45-...', creada }
+```
+
+⚠️ **La generación ocurre aquí y solo aquí.** Si el cliente pudiera decidir qué
+lleva su tabla, el día que el servidor valide las loterías solo, cualquiera se
+haría una con las cartas ya cantadas. Es dinero decidido en el navegador.
+
+Tres cosas del original (`generador/index.html` del frontend) que se cambiaron a
+propósito:
+
+- El barajado usaba `sort(() => Math.random() - 0.5)`, que no da permutaciones
+  uniformes: medido, la primera carta salía primera un 90% más de lo que le
+  tocaba. Ahora es Fisher-Yates con `crypto.randomInt`.
+- La firma ordena las cartas antes de comparar. Dos tablas con las mismas 16
+  cartas colocadas distinto se llenan a la vez, así que cuentan como la misma.
+- Los modos quedaron atados al juego: `normal` para Tradicional y Llena,
+  `esquinas` para Pozo, `dobles` para un modo que aún no existe.
+
+`npm test` comprueba las dos partes sin necesidad de Firestore ni red.
+
