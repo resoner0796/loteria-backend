@@ -33,22 +33,45 @@ const path = require('path');
 const crypto = require('crypto');
 
 const {
-    CASILLAS, TOTAL_BARAJAS, CASILLAS_ESQUINAS, firmaDeTabla
+    CASILLAS, TOTAL_BARAJAS, CASILLAS_ESQUINAS, CASILLAS_DOBLE, firmaDeTabla
 } = require('../generador');
 
 const SALIDA = path.join(__dirname, '..', 'cartas-sistema.json');
 
 /**
- * Los conjuntos que se generan, uno por forma de carta.
+ * Dónde va cada baraja de una carta, por forma.
  *
- * `huecos` dice en qué casillas de la rejilla 4×4 van las barajas. El modo
- * normal las llena todas; el de esquinas solo ocho, que es con lo que se juega
- * el Pozo. Son conjuntos SEPARADOS: el Pozo nunca mezcla sus cartas con las
- * otras, así que equilibrarlos juntos no tendría sentido.
+ * Es una lista de LISTAS: cada elemento son las casillas que ocupa una misma
+ * baraja. Casi siempre es una sola, pero en el modo dobles la primera ocupa dos
+ * —las del centro— y ese es justo el sentido del modo: cuando la cantan,
+ * tapas dos casillas de golpe.
+ *
+ * Se escribe así, y no como una lista de índices, porque el número de barajas
+ * de una carta deja de coincidir con el de casillas: en dobles son 15 barajas
+ * en 16 casillas. Todo lo demás —el equilibrio, la separación— trabaja sobre
+ * las barajas, no sobre las casillas.
+ */
+const sueltas = (casillas) => casillas.map(c => [c]);
+
+const HUECOS = {
+    normal:   sueltas([...Array(CASILLAS).keys()]),
+    esquinas: sueltas(CASILLAS_ESQUINAS),
+    dobles:   [
+        CASILLAS_DOBLE,
+        ...sueltas([...Array(CASILLAS).keys()].filter(i => !CASILLAS_DOBLE.includes(i)))
+    ]
+};
+
+/**
+ * Los conjuntos que se generan, uno por modo de juego.
+ *
+ * Son conjuntos SEPARADOS: un modo nunca mezcla sus cartas con las de otro, así
+ * que equilibrarlos juntos no tendría sentido.
  */
 const CONJUNTOS = [
-    { nombre: 'normal',   cuantas: 60, huecos: [...Array(CASILLAS).keys()] },
-    { nombre: 'esquinas', cuantas: 20, huecos: CASILLAS_ESQUINAS }
+    { nombre: 'normal',   cuantas: 60, huecos: HUECOS.normal },
+    { nombre: 'esquinas', cuantas: 20, huecos: HUECOS.esquinas },
+    { nombre: 'dobles',   cuantas: 60, huecos: HUECOS.dobles }
 ];
 
 /** Cuántos intercambios se prueban al afinar cada conjunto. */
@@ -219,7 +242,9 @@ function medir(cartas, porCarta) {
 }
 
 function informar(conjunto, m) {
-    console.log(`\n  ── ${conjunto.nombre.toUpperCase()} · ${conjunto.cuantas} cartas de ${conjunto.huecos.length} casillas ──\n`);
+    const casillasUsadas = conjunto.huecos.flat().length;
+    console.log(`\n  ── ${conjunto.nombre.toUpperCase()} · ${conjunto.cuantas} cartas · `
+        + `${conjunto.huecos.length} barajas en ${casillasUsadas} casillas ──\n`);
     console.log('  EQUILIBRIO — cuántas veces aparece cada baraja');
     console.log(`    entre ${m.minUso} y ${m.maxUso} veces (media ${m.mediaUso.toFixed(1)})`);
     console.log(`    diferencia entre la más y la menos usada: ${m.maxUso - m.minUso}`);
@@ -268,7 +293,9 @@ for (const conjunto of CONJUNTOS) {
     // forma que espera el juego, con null en las casillas que no se usan.
     salida.conjuntos[conjunto.nombre] = cartas.map((barajas, i) => {
         const rejilla = new Array(CASILLAS).fill(null);
-        conjunto.huecos.forEach((casilla, n) => { rejilla[casilla] = barajas[n]; });
+        conjunto.huecos.forEach((casillas, n) => {
+            casillas.forEach(c => { rejilla[c] = barajas[n]; });
+        });
         return {
             // El id es el número de la carta, con ceros, como los que ya usa el
             // juego: así el resto del sistema —selección, apuestas, validación—

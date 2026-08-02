@@ -258,6 +258,7 @@ app.use('/api/', limitador(1, 200, 'Vas demasiado rápido. Espera un momento.'))
 // de /api/admin/uso-heredado se queden en cero.
 const jwt = require('jsonwebtoken');
 const generador = require('./generador');
+const { evaluarReclamo, NOMBRE_FIGURA } = require('./victoria');
 
 const MODO_ESTRICTO = process.env.AUTH_ESTRICTA === 'true';
 const VIGENCIA_TOKEN = '30d';
@@ -1428,7 +1429,11 @@ const MODOS_JUEGO = {
     // y los otros dos las llenan enteras.
     'tradicional': { costo: 1, conjunto: 'normal' },
     'llena':       { costo: 2, conjunto: 'normal' },
-    'pozo':        { costo: 2, conjunto: 'esquinas' }
+    'pozo':        { costo: 2, conjunto: 'esquinas' },
+    // En Doble una baraja ocupa las dos casillas del centro: cuando la cantan,
+    // se tapan dos de golpe. Eso acerca el cuadro del centro y las dos líneas
+    // que pasan por ahí, así que las partidas son más rápidas.
+    'doble':       { costo: 2, conjunto: 'dobles' }
 };
 
 /** Las cartas del sistema que le tocan a un modo, listas para mandar al cliente. */
@@ -1929,163 +1934,176 @@ io.on('connection', (socket) => {
   });
 
   socket.on('loteria', ({ nickname, sala, boardState }) => {
-    if (!salas[sala]) return;
     const salaInfo = salas[sala];
+    if (!salaInfo) return;
+    const jugador = salaInfo.jugadores[socket.id];
+    if (!jugador) return;
+    if (!salaInfo.juegoIniciado && !salaInfo.validandoEmpate) return;
 
-    // Las barajas de cada carta las pone el SERVIDOR, nunca el cliente. El
-    // navegador manda las suyas para pintar, pero son justo el dato con el que
-    // se decide quién gana: si se aceptaran tal cual, bastaría con editar el
-    // evento y mandar las barajas ya cantadas.
+    // Las barajas de cada carta las pone el SERVIDOR, nunca el cliente. Si se
+    // aceptaran las que manda el navegador, bastaría con editar el evento y
+    // mandar las barajas que acaban de cantarse.
     //
     // Salen de dos sitios según de quién sea la carta. Las del sistema están en
     // `cartas-sistema.json`, iguales para todos; las compradas se guardaron al
     // seleccionarlas, leídas de Firestore.
-    const jugadorActual = salaInfo.jugadores[socket.id];
-    if (boardState && jugadorActual) {
-        boardState.propias = {};
-        (boardState.cards || []).forEach(id => {
-            const guardadas = jugadorActual.barajasPropias?.[id]
-                           || barajasDeCartaSistema(salaInfo.modoJuego, id);
-            if (guardadas) boardState.propias[id] = guardadas;
-        });
+    const cartas = {};
+    (boardState?.cards || []).forEach(id => {
+        const guardadas = jugador.barajasPropias?.[id]
+                       || barajasDeCartaSistema(salaInfo.modoJuego, id);
+        if (guardadas) cartas[id] = guardadas;
+    });
+
+    // AQUÍ decide el servidor, y ya no el anfitrión mirando. Compara las
+    // barajas de las cartas con su propio historial de lo cantado.
+    const veredicto = evaluarReclamo({
+        cartas,
+        marcadas: boardState?.marcadas || {},
+        historial: salaInfo.historial || [],
+        modo: salaInfo.modoJuego
+    });
+
+    // Un grito en falso ya no para la partida: se le contesta a quien lo dio y
+    // el juego sigue cantando. Antes bastaba con picar el botón de broma para
+    // congelar a toda la sala hasta que el anfitrión resolviera.
+    if (!veredicto.gano) {
+        socket.emit('loteria-rechazada', { motivo: veredicto.motivo });
+        return;
     }
-    if (!salaInfo.juegoIniciado && !salaInfo.validandoEmpate) return;
+
+    const reclamante = {
+        id: socket.id,
+        nickname,
+        boardState,
+        status: 'validado',
+        veredicto
+    };
+
+    // La prueba que ve la sala: la carta ganadora con sus fichas y la figura que
+    // se completó. Las barajas las pone el servidor, no el navegador.
+    const guardarPrueba = () => {
+        salaInfo.pruebaVictoria = {
+            tabla: veredicto.carta,
+            fichas: boardState?.chips?.[veredicto.carta] || [],
+            skin: boardState?.skin || null,
+            nickname,
+            barajas: cartas[veredicto.carta] || null,
+            figura: veredicto.tipo,
+            casillas: veredicto.casillas
+        };
+    };
+
+    // El pozo acumulado se lleva por llenar las cuatro del centro, y solo si esa
+    // persona aportó en esta ronda: quien no se apuntó queda fuera aunque haya
+    // ganado la lotería.
+    if (veredicto.ganoCentro && jugador.pozoActivo) salaInfo.ganadorPozo = socket.id;
+
     if (!salaInfo.validandoEmpate) {
         salaInfo.juegoIniciado = false;
         salaInfo.validandoEmpate = true;
         if (salaInfo.intervaloCartas) clearInterval(salaInfo.intervaloCartas);
-        salaInfo.reclamantes.push({ id: socket.id, nickname, boardState, status: 'pendiente' });
+        salaInfo.reclamantes.push(reclamante);
+        guardarPrueba();
+
+        // La pausa se mantiene aunque ya no haya nada que juzgar: es para
+        // recoger a quien complete su figura con la MISMA baraja. Sin ella, el
+        // primero en reaccionar se llevaría el bote entero por unos milisegundos.
         io.to(sala).emit('pausa-empate', { primerGanador: nickname, tiempo: 4 });
-        salaInfo.timerEmpate = setTimeout(() => {
-            io.to(salaInfo.hostId).emit('iniciar-validacion-secuencial', salaInfo.reclamantes);
-        }, 4000);
-    } else {
-        const yaEsta = salaInfo.reclamantes.find(r => r.id === socket.id);
-        if (!yaEsta) {
-            salaInfo.reclamantes.push({ id: socket.id, nickname, boardState, status: 'pendiente' });
-            io.to(sala).emit('notificar-otro-ganador', nickname);
-        }
+        salaInfo.timerEmpate = setTimeout(() => cerrarRonda(sala), 4000);
+    } else if (!salaInfo.reclamantes.find(r => r.id === socket.id)) {
+        salaInfo.reclamantes.push(reclamante);
+        io.to(sala).emit('notificar-otro-ganador', nickname);
     }
   });
 
-  socket.on('veredicto-host', async ({ sala, candidatoId, esValido, tablaGanadora, ganoPozo }) => {
+  /**
+   * Reparte el bote y cierra la ronda.
+   *
+   * Antes esto vivía dentro de `veredicto-host`, que corría cada vez que el
+   * anfitrión juzgaba a alguien y pagaba al juzgar al último. Ahora que valida
+   * el servidor no hay a quién esperar: se llama una sola vez, cuando se cierra
+   * la ventana de empates.
+   */
+  async function cerrarRonda(sala) {
       const salaInfo = salas[sala];
-      if (!salaInfo || socket.id !== salaInfo.hostId) return;
-      const candidato = salaInfo.reclamantes.find(r => r.id === candidatoId);
-      if (candidato) candidato.status = esValido ? 'validado' : 'rechazado';
+      if (!salaInfo) return;
 
-      // CUÁL de sus tablas se llenó. Se guarda junto con las fichas que tenía
-      // encima, porque esa tabla completa es la prueba que ve la sala. Importa
-      // sobre todo cuando el anfitrión se valida a sí mismo: pasa de pedir que
-      // le crean a poder enseñarlo.
-      //
-      // Solo se acepta si la tabla era de verdad del reclamante; si no, el
-      // anfitrión podría señalar una tabla que esa persona nunca tuvo.
-      // ¿Se llevó también el pozo? Solo si aportó en esta ronda: quien no se
-      // apuntó queda fuera aunque haya ganado la lotería, tal como se acordó.
-      if (esValido && ganoPozo && candidato) {
-          const jug = salaInfo.jugadores[candidato.id];
-          if (jug && jug.pozoActivo) salaInfo.ganadorPozo = candidato.id;
-          else console.log(`Se marcó pozo para ${candidato.nickname}, pero no aportó en esta ronda.`);
+      const ganadoresReales = salaInfo.reclamantes.filter(r => r.status === 'validado');
+      if (ganadoresReales.length > 0) {
+      const boteTotal = salaInfo.bote;
+      const premioPorCabeza = Math.floor(boteTotal / ganadoresReales.length);
+
+      // Lista de IDs ganadores para fácil acceso
+      const idsGanadores = ganadoresReales.map(g => g.id);
+
+      // RECORREMOS TODOS LOS JUGADORES PARA ACTUALIZAR RACHAS
+      for (const playerId in salaInfo.jugadores) {
+          const jugador = salaInfo.jugadores[playerId];
+
+          if (idsGanadores.includes(playerId)) {
+              // ES GANADOR: Aumenta racha y da premio
+              jugador.racha = (jugador.racha || 0) + 1;
+              jugador.monedas += premioPorCabeza;
+              await actualizarSaldoUsuario(jugador);
+              // Solo registramos movimiento si tiene email
+              if(jugador.email) await registrarMovimiento(jugador.email, 'victoria', premioPorCabeza, `Premio Lotería!`, true);
+          } else {
+              // PERDEDOR: Se le apaga la flama
+              jugador.racha = 0;
+          }
+
+          // Resetear apuesta
+          jugador.apostado = false;
       }
 
-      if (esValido && candidato && tablaGanadora) {
-          const suyas = candidato.boardState?.cards || [];
-          if (suyas.includes(String(tablaGanadora))) {
-              salaInfo.pruebaVictoria = {
-                  tabla: String(tablaGanadora),
-                  fichas: candidato.boardState?.chips?.[String(tablaGanadora)] || [],
-                  skin: candidato.boardState?.skin || null,
-                  nickname: candidato.nickname,
-                  // Las 16 barajas de la carta ganadora viajan con la prueba,
-                  // puestas por el servidor. Es lo que se pinta para enseñar a
-                  // toda la sala con qué se ganó: ya no hay una imagen que
-                  // buscar por su nombre, una carta son sus barajas.
-                  barajas: candidato.boardState?.propias?.[String(tablaGanadora)] || null
-              };
+      // --- POZO ACUMULADO ---
+      // Se paga aparte del bote y vacía el acumulado. Solo si el anfitrión
+      // lo marcó y esa persona aportó en esta ronda.
+      let pozoPagado = 0;
+      let quienGanoElPozo = null;
+      if (salaInfo.ganadorPozo && idsGanadores.includes(salaInfo.ganadorPozo)) {
+          const jug = salaInfo.jugadores[salaInfo.ganadorPozo];
+          const monto = salaInfo.pozoAcumulado || 0;
+          if (jug && jug.pozoActivo && monto > 0) {
+              jug.monedas += monto;
+              await actualizarSaldoUsuario(jug);
+              if (jug.email) await registrarMovimiento(jug.email, 'premio', monto, '🎰 ¡Se llevó el POZO!', true);
+              await moverPozo(salaInfo, -monto);
+              pozoPagado = monto;
+              quienGanoElPozo = jug.nickname;
           }
       }
-      const pendientes = salaInfo.reclamantes.filter(r => r.status === 'pendiente');
-      if (pendientes.length > 0) {
-          io.to(salaInfo.hostId).emit('continuar-validacion', salaInfo.reclamantes);
-      } else {
-          const ganadoresReales = salaInfo.reclamantes.filter(r => r.status === 'validado');
-          if (ganadoresReales.length > 0) {
-          const boteTotal = salaInfo.bote;
-          const premioPorCabeza = Math.floor(boteTotal / ganadoresReales.length);
 
-          // Lista de IDs ganadores para fácil acceso
-          const idsGanadores = ganadoresReales.map(g => g.id);
+      // La ronda terminó: se limpian las aportaciones y los apuntados.
+      salaInfo.pozoRonda = {};
+      salaInfo.ganadorPozo = null;
+      for (const id in salaInfo.jugadores) salaInfo.jugadores[id].pozoActivo = false;
 
-          // RECORREMOS TODOS LOS JUGADORES PARA ACTUALIZAR RACHAS
-          for (const playerId in salaInfo.jugadores) {
-              const jugador = salaInfo.jugadores[playerId];
+      salaInfo.bote = 0;
+      salaInfo.pagoRealizado = true;
+      salaInfo.reclamantes = [];
+      salaInfo.validandoEmpate = false;
 
-              if (idsGanadores.includes(playerId)) {
-                  // ES GANADOR: Aumenta racha y da premio
-                  jugador.racha = (jugador.racha || 0) + 1;
-                  jugador.monedas += premioPorCabeza;
-                  await actualizarSaldoUsuario(jugador);
-                  // Solo registramos movimiento si tiene email
-                  if(jugador.email) await registrarMovimiento(jugador.email, 'victoria', premioPorCabeza, `Premio Lotería!`, true);
-              } else {
-                  // PERDEDOR: Se le apaga la flama
-                  jugador.racha = 0;
-              }
-
-              // Resetear apuesta
-              jugador.apostado = false;
-          }
-
-          // --- POZO ACUMULADO ---
-          // Se paga aparte del bote y vacía el acumulado. Solo si el anfitrión
-          // lo marcó y esa persona aportó en esta ronda.
-          let pozoPagado = 0;
-          let quienGanoElPozo = null;
-          if (salaInfo.ganadorPozo && idsGanadores.includes(salaInfo.ganadorPozo)) {
-              const jug = salaInfo.jugadores[salaInfo.ganadorPozo];
-              const monto = salaInfo.pozoAcumulado || 0;
-              if (jug && jug.pozoActivo && monto > 0) {
-                  jug.monedas += monto;
-                  await actualizarSaldoUsuario(jug);
-                  if (jug.email) await registrarMovimiento(jug.email, 'premio', monto, '🎰 ¡Se llevó el POZO!', true);
-                  await moverPozo(salaInfo, -monto);
-                  pozoPagado = monto;
-                  quienGanoElPozo = jug.nickname;
-              }
-          }
-
-          // La ronda terminó: se limpian las aportaciones y los apuntados.
-          salaInfo.pozoRonda = {};
-          salaInfo.ganadorPozo = null;
-          for (const id in salaInfo.jugadores) salaInfo.jugadores[id].pozoActivo = false;
-
-          salaInfo.bote = 0;
-          salaInfo.pagoRealizado = true;
-          salaInfo.reclamantes = [];
+      io.to(sala).emit('ganadores-multiples', {
+          ganadores: ganadoresReales.map(g => g.nickname),
+          premio: premioPorCabeza,
+          prueba: salaInfo.pruebaVictoria || null,
+          pozoGanado: pozoPagado,
+          ganadorPozo: quienGanoElPozo
+      });
+      salaInfo.pruebaVictoria = null;
+      io.to(sala).emit('pozo-actualizado', salaInfo.pozoAcumulado || 0);
+      io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores); // Aquí se envían las nuevas rachas
+      io.to(sala).emit('bote-actualizado', 0);
+  } 
+      else {
           salaInfo.validandoEmpate = false;
-
-          io.to(sala).emit('ganadores-multiples', {
-              ganadores: ganadoresReales.map(g => g.nickname),
-              premio: premioPorCabeza,
-              prueba: salaInfo.pruebaVictoria || null,
-              pozoGanado: pozoPagado,
-              ganadorPozo: quienGanoElPozo
-          });
-          salaInfo.pruebaVictoria = null;
-          io.to(sala).emit('pozo-actualizado', salaInfo.pozoAcumulado || 0);
-          io.to(sala).emit('jugadores-actualizados', salaInfo.jugadores); // Aquí se envían las nuevas rachas
-          io.to(sala).emit('bote-actualizado', 0);
-      } 
-          else {
-              salaInfo.validandoEmpate = false;
-              salaInfo.reclamantes = [];
-              salaInfo.juegoIniciado = true;
-              io.to(sala).emit('falsa-alarma-masiva');
-              repartirCartas(sala);
-          }
+          salaInfo.reclamantes = [];
+          salaInfo.juegoIniciado = true;
+          io.to(sala).emit('falsa-alarma-masiva');
+          repartirCartas(sala);
       }
-  });
+  }
 
   socket.on('salir-sala', async (sala) => {
     if (salas[sala] && salas[sala].jugadores[socket.id]) {

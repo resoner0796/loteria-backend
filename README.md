@@ -125,6 +125,82 @@ node --check server.js
 
 ---
 
+## 🎴 Las cartas de Lotería, y quién gana
+
+Una carta **no es una imagen**: es una lista de 16 números (o `null` en las
+casillas vacías). Ese cambio es lo que permite que el servidor sepa qué lleva
+cada carta y decida las victorias solo.
+
+### Generarlas — `scripts/generar-cartas-sistema.js`
+
+Escribe `cartas-sistema.json`, que está **commiteado**. Se ejecuta a mano: si se
+generaran al arrancar, cada reinicio de Render repartiría cartas distintas a
+media partida.
+
+Persigue dos cosas contrarias entre sí:
+
+- **Equilibrio** — cada baraja aparece las mismas veces, para que ninguna carta
+  vaya con ventaja partida tras partida.
+- **Separación** — dos cartas comparten lo menos posible, para que no se llenen a
+  la vez y haya que partir el bote.
+
+| Conjunto | Modos | Equilibrio | Comparten máx. | Media | Al azar |
+|---|---|---|---|---|---|
+| `normal` 60×16 | Tradicional, Llena | 17–18 | 7 | 4.55 | 4.74 (máx. 11) |
+| `esquinas` 20×8 | Pozo | 2–3 | 1 | 0.83 | 1.19 |
+| `dobles` 60×15 | Doble | 16–17 | 6 | 3.99 | 4.17 |
+
+⚠️ **La media no se puede bajar.** Con reparto parejo queda fijada por la
+aritmética; lo que el afinado mejora es el máximo. Si alguien propone
+«optimizarlo más», ese es el techo.
+
+El script **se niega a escribir** si al final hay barajas repetidas dentro de una
+carta, cartas duplicadas o desequilibrio mayor que 1.
+
+### Validar la victoria — `victoria.js`
+
+Antes el anfitrión miraba la carta del reclamante y decidía. Dos problemas que no
+se arreglan mirando mejor: se validaba a sí mismo, y cualquiera podía picar
+LOTERÍA de broma y congelar la sala.
+
+Hoy, al recibir `loteria`:
+
+1. Se toman las barajas de cada carta **de aquí**, nunca del cliente:
+   `cartas-sistema.json` para las del sistema, Firestore para las compradas.
+2. Se cruzan con `salaInfo.historial` y con las casillas que el cliente dice
+   haber tapado.
+3. Se buscan las **20 figuras**: 4 horizontales, 4 verticales, 2 diagonales, las
+   4 esquinas y los 9 cuadros de 2×2. Se generan, no se escriben a mano.
+4. Sin figura → `loteria-rechazada` solo a quien gritó, **y el juego sigue**.
+   Con figura → pausa de empates y `cerrarRonda()` reparte.
+
+⚠️ **Lo que decide el dinero es que la baraja esté CANTADA**, y eso lo sabe el
+servidor. Las fichas las manda el navegador y podrían falsearse, pero mentir ahí
+solo saltaría el requisito de haber estado atento — nunca daría por buena una
+carta cuyas barajas no hayan salido.
+
+---
+
+## 🧪 Pruebas
+
+```bash
+npm test
+```
+
+No hace falta ni Firestore ni red: son funciones puras salvo por el azar, y lo
+aleatorio se comprueba midiendo la distribución sobre muchas repeticiones.
+
+| Archivo | Qué cubre |
+|---|---|
+| `generador.prueba.js` | Los tres modos de carta, el barajado sin sesgo, las cartas a medida |
+| `pack.prueba.js` | Que un pack no repita cartas ni te venda una que ya tienes |
+| `victoria.prueba.js` | Las 20 figuras, las condiciones por modo, y que un grito en falso no gane |
+
+⚠️ Una prueba que nunca falla no prueba nada. Al añadir una, rómpela a propósito
+y comprueba que salta.
+
+---
+
 ## 🗄️ Datos
 
 Firestore, con el **email como ID de documento**:
@@ -134,6 +210,7 @@ usuarios/{email}
   nickname · password (bcrypt) · monedas · avatar · inventario[]
   fichaActiva · cartasFavoritas[] · baneado · fcmToken · ultimaRecompensa
   └── historial/{id}   tipo · monto · descripcion · esIngreso · fecha
+  └── tablas/{id}      cartas[16] · modo · firma      ← las compradas
 
 nicknames/{minúsculas} email · nickname     ← índice de unicidad
 pagos_procesados/{id}  email · monedas · montoMXN   ← idempotencia de Stripe
@@ -241,7 +318,11 @@ camino viejo: pon `AUTH_ESTRICTA=true` en Render y queda cerrado.
 - [x] `crypto.randomInt()` en barajas, dados y códigos de mesa
 - [x] CORS restringido a los dominios propios
 - [x] Mover `ADMIN_EMAIL` a variable de entorno
+- [x] **Cartas del sistema como datos**, generadas y equilibradas por modo
+- [x] **Validación automática de victoria** — el servidor busca las 20 figuras
+- [x] Modo **Doble**: una baraja ocupa las dos casillas del centro
 - [ ] Estado de salas en Redis
 - [ ] Partir `server.js` en módulos por juego
+- [ ] Bot que juegue solo — el servidor ya sabe marcar y validar
 - [x] Webhook de Stripe en lugar de confiar solo en el redirect de retorno
 - [ ] Evaluar migración a VPS propio
